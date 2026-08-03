@@ -2,8 +2,8 @@
     "infer_steps": 4,
     "target_video_length": 81,
     "text_len": 512,
-    "target_height": 480,
-    "target_width": 832,
+    "target_height": 720,
+    "target_width": 1280,
     "self_attn_1_type": "dynamic_sparse_attn",
     "dynamic_sparse_attn_setting": {
         "sparsity_ratio": 0.9,
@@ -29,8 +29,8 @@
     ],
     "dit_quantized": true,
     "dit_quant_scheme": "nvfp4",
-    "high_noise_quantized_ckpt": "path to high_nvfp4.safetensors",
-    "low_noise_quantized_ckpt": "path to low_nvfp4.safetensors",
+    "high_noise_quantized_ckpt": "models/Wan2.2-NVFP4-Sparse/Wan2.2-T2V-A14B_NVFP4_Sparse_high.safetensors",
+    "low_noise_quantized_ckpt": "models/Wan2.2-NVFP4-Sparse/Wan2.2-T2V-A14B_NVFP4_Sparse_low.safetensors",
     "high_noise_original_ckpt": null,
     "low_noise_original_ckpt": null
 }

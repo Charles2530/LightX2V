@@ -1,17 +1,17 @@
 model:
   name: wan_fastwam
   running_dtype: bf16
-  model_path: /path/to/Wan-AI/Wan2.2-TI2V-5B
+  model_path: ./models/Wan2.2-TI2V-5B
 
 data:
   train: &libero_data
     name: libero_fastwam_dataset
     dataset_dirs:
       # https://huggingface.co/datasets/yuanty/LIBERO-fastwam
-      - /path/to/LIBERO-fastwam/libero_spatial_no_noops_lerobot
-      - /path/to/LIBERO-fastwam/libero_object_no_noops_lerobot
-      - /path/to/LIBERO-fastwam/libero_goal_no_noops_lerobot
-      - /path/to/LIBERO-fastwam/libero_10_no_noops_lerobot
+      - ./datasets/fastwam/libero_mujoco3.3.2/libero_spatial_no_noops_lerobot
+      - ./datasets/fastwam/libero_mujoco3.3.2/libero_object_no_noops_lerobot
+      - ./datasets/fastwam/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
+      - ./datasets/fastwam/libero_mujoco3.3.2/libero_10_no_noops_lerobot
     batch_size: 8
     num_workers: 8
   val:

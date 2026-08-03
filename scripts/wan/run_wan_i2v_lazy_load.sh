@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # set path firstly
-lightx2v_path=
-model_path=
+lightx2v_path=/mnt/afs_1/charles/codes/LightX2V/
+model_path=/mnt/afs_1/charles/codes/LightX2V/models/Wan2.1-I2V-14B-480P
 
 export CUDA_VISIBLE_DEVICES=0
 # set environment variables
