@@ -19,6 +19,7 @@ POLICY_CONFIG="$EVAL_ROOT/configs/fastwam/libero_plus_i2va_dmd_1step.json"
 DATASET_STATS=/mnt/afs_1/charles/models/fastwam/libero_uncond_2cam224_dataset_stats.json
 LIBERO_ROOT=/mnt/afs_1/charles/codes/LIBERO-plus
 NVIDIA_EGL_ROOT=${NVIDIA_EGL_ROOT:-/mnt/afs_1/charles/env/nvidia-egl-550.90.07/root}
+ENV_WORKERS_PER_DEVICE=${ENV_WORKERS_PER_DEVICE:-12}
 PROTOCOL_DIRECTORY=${PROTOCOL_DIRECTORY:-official_protocol_shared_policy}
 SCRIPT_ARGS=("$@")
 
@@ -33,7 +34,7 @@ evaluate_adapter() {
         --dataset-stats "$DATASET_STATS" \
         --libero-root "$LIBERO_ROOT" \
         --devices 1 2 3 4 5 6 7 \
-        --env-workers-per-device 12 \
+        --env-workers-per-device "$ENV_WORKERS_PER_DEVICE" \
         --episodes-per-task 50 \
         --tasks-per-shard 1 \
         --seed 0 \

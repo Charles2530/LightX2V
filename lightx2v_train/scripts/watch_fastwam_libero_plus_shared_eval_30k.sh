@@ -35,6 +35,9 @@ tmux set-environment -g PYTHON "$PYTHON"
 if [[ -n "${NVIDIA_EGL_ROOT:-}" ]]; then
     tmux set-environment -g NVIDIA_EGL_ROOT "$NVIDIA_EGL_ROOT"
 fi
+if [[ -n "${ENV_WORKERS_PER_DEVICE:-}" ]]; then
+    tmux set-environment -g ENV_WORKERS_PER_DEVICE "$ENV_WORKERS_PER_DEVICE"
+fi
 
 latest_progress_epoch() {
     local latest
