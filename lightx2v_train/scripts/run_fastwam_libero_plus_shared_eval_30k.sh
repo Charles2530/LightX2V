@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Spawned LIBERO environments otherwise inherit host-wide 96/192-thread pools.
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
 ROOT=/mnt/afs_1/charles/codes/LightX2V_fastwam
 PYTHON=${PYTHON:-/mnt/afs_1/charles/env/miniconda3/envs/lightx2v_libero_plus/bin/python}
 EVALUATOR="$ROOT/lightx2v_train/tools/eval_fastwam_libero_shared_checkpoint.py"
@@ -31,6 +37,7 @@ evaluate_adapter() {
         --expected-action-infer-steps 1 \
         --expected-actions-per-plan 10 \
         --prompt-cache-limit 256 \
+        --startup-timeout 3600 \
         "${SCRIPT_ARGS[@]}"
 }
 
