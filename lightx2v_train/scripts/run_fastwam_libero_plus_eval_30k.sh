@@ -23,7 +23,7 @@ evaluate_adapter() {
         --dataset-stats "$DATASET_STATS" \
         --libero-root "$LIBERO_ROOT" \
         --devices 1 2 3 4 5 6 7 \
-        --workers-per-device 2 \
+        --workers-per-device 3 \
         --episodes-per-task 50 \
         --tasks-per-shard 10 \
         --seed 0 \
