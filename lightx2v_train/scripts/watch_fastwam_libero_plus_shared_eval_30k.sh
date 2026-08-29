@@ -17,6 +17,7 @@ COMPARISON_SUMMARY="$RESULTS/comparison_summary.json"
 FINAL_AGGREGATOR="$REPORT_ROOT/lightx2v_train/tools/aggregate_fastwam_libero_shared_results.py"
 FINAL_AGGREGATOR_LOG="$RESULTS/final_aggregation.log"
 SNAPSHOT_AUDIT="$RESULTS/FROZEN_SNAPSHOT_PROTOCOL_AUDIT.json"
+TASK_CATALOG_AUDIT="$RESULTS/TASK_CATALOG_RESOURCE_AUDIT.json"
 PROGRESS_TOOL="$ROOT/lightx2v_train/tools/report_fastwam_libero_shared_progress.py"
 PROGRESS_OUTPUT="$RESULTS/LIVE_PROGRESS.json"
 STALL_TIMEOUT_SECONDS=${STALL_TIMEOUT_SECONDS:-3600}
@@ -84,6 +85,11 @@ verification = payload.get("verification", {})
 valid = len(weights) == 4 and verification.get(
     "checkpoint_and_dependency_hashes_match_snapshot"
 )
+valid = (
+    valid
+    and verification.get("evaluation_and_official_hashes_match_snapshot")
+    and verification.get("libero_task_resources_match_baseline")
+)
 for item in weights.values():
     checkpoint = item.get("checkpoint", {})
     logs = item.get("server_log_evidence", [])
@@ -108,6 +114,7 @@ run_final_aggregator() {
         --results-root "$RESULTS" \
         --protocol-directory "$PROTOCOL_DIRECTORY" \
         --snapshot-audit "$SNAPSHOT_AUDIT" \
+        --task-catalog-audit "$TASK_CATALOG_AUDIT" \
         --weight native native /mnt/afs_1/charles/models/fastwam/libero_uncond_2cam224.pt \
         --weight old_success_baseline_30k old_success_baseline_30k \
             "$ARTIFACT_ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_16gpu_mbs48_nogc/exports/checkpoint-000030000-student.pt" \

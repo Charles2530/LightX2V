@@ -3,6 +3,8 @@
 import argparse
 import hashlib
 import json
+import locale
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +43,10 @@ def parse_args():
         "--snapshot-audit",
         help="Frozen pre-run audit containing expected checkpoint and dependency SHA256 values",
     )
+    parser.add_argument(
+        "--task-catalog-audit",
+        help="Baseline audit for the LIBERO-plus task catalog, BDDL, and init-state resources",
+    )
     return parser.parse_args()
 
 
@@ -54,6 +60,106 @@ def sha256_file(path):
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def verified_file(name, expected):
+    path = Path(expected.get("path", "")).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing frozen {name}: {path}")
+    actual_sha256 = sha256_file(path)
+    if actual_sha256 != expected.get("sha256"):
+        raise RuntimeError(f"{name} SHA256 differs from frozen audit: {path}")
+    return {
+        "path": str(path),
+        "sha256": actual_sha256,
+        "matches_snapshot_audit": True,
+    }
+
+
+def directory_content_digest(path, relative_root):
+    path = Path(path).expanduser().resolve()
+    relative_root = Path(relative_root).expanduser().resolve()
+    if not path.is_dir():
+        raise FileNotFoundError(f"Missing frozen resource directory: {path}")
+    locale.setlocale(locale.LC_COLLATE, "zh_CN.UTF-8")
+    files = sorted(
+        (item for item in path.rglob("*") if item.is_file()),
+        key=lambda item: locale.strxfrm(item.relative_to(relative_root).as_posix()),
+    )
+    digest = hashlib.sha256()
+    for item in files:
+        relative = item.relative_to(relative_root).as_posix()
+        if "\\" in relative or "\n" in relative:
+            raise RuntimeError(f"Unsupported resource path for sha256sum-compatible digest: {item}")
+        digest.update(f"{sha256_file(item)}  {relative}\n".encode("utf-8"))
+    return len(files), digest.hexdigest()
+
+
+def git_head(path):
+    return subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def load_task_catalog_audit(path):
+    if not path:
+        return None
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing task catalog resource audit: {path}")
+    payload = common.load_json(path)
+    libero = payload.get("libero_plus", {})
+    libero_root = Path(libero.get("root", "")).expanduser().resolve()
+    expected_commit = libero.get("git_commit")
+    actual_commit = git_head(libero_root)
+    if actual_commit != expected_commit:
+        raise RuntimeError(
+            f"LIBERO-plus commit differs from task catalog audit: {actual_commit} != {expected_commit}"
+        )
+
+    runtime_config = verified_file(
+        "LIBERO runtime config",
+        {
+            "path": libero.get("runtime_config"),
+            "sha256": libero.get("runtime_config_sha256"),
+        },
+    )
+    catalog = verified_file("LIBERO task catalog", payload.get("task_catalog", {}))
+    benchmark_root = libero_root / "libero" / "libero"
+    resources = {}
+    for name in ("benchmark", "bddl_files", "init_files"):
+        expected = payload.get("resource_snapshots", {}).get(name, {})
+        resource_path = Path(expected.get("path", "")).expanduser().resolve()
+        file_count, content_digest = directory_content_digest(resource_path, benchmark_root)
+        if file_count != int(expected.get("file_count", -1)):
+            raise RuntimeError(
+                f"{name} file count differs from task catalog audit: "
+                f"{file_count} != {expected.get('file_count')}"
+            )
+        if content_digest != expected.get("content_digest"):
+            raise RuntimeError(f"{name} content digest differs from task catalog audit: {resource_path}")
+        resources[name] = {
+            "path": str(resource_path),
+            "file_count": file_count,
+            "content_digest": content_digest,
+            "matches_task_catalog_audit": True,
+        }
+    return {
+        "task_counts": payload["task_catalog"]["suite_counts"],
+        "total_tasks": int(payload["task_catalog"]["total_tasks"]),
+        "output": {
+            "path": str(path),
+            "sha256": sha256_file(path),
+            "libero_plus_root": str(libero_root),
+            "libero_plus_git_commit": actual_commit,
+            "runtime_config": runtime_config,
+            "task_catalog": catalog,
+            "resources": resources,
+        },
+    }
 
 
 def checkpoint_evidence(adapter, expected=None):
@@ -94,17 +200,29 @@ def load_snapshot_audit(path):
 
     verified_dependencies = {}
     for name, expected in (("dataset_stats", dataset_stats), ("policy_config", policy_config)):
-        dependency_path = Path(expected.get("path", "")).expanduser().resolve()
-        if not dependency_path.is_file():
-            raise FileNotFoundError(f"Missing frozen dependency {name}: {dependency_path}")
-        actual_sha256 = sha256_file(dependency_path)
-        if actual_sha256 != expected.get("sha256"):
-            raise RuntimeError(f"{name} SHA256 differs from frozen audit: {dependency_path}")
-        verified_dependencies[name] = {
-            "path": str(dependency_path),
-            "sha256": actual_sha256,
-            "matches_snapshot_audit": True,
-        }
+        verified_dependencies[name] = verified_file(name, expected)
+
+    official = payload.get("official_protocol", {})
+    verified_official = {
+        "metric_script": verified_file(
+            "official metric script",
+            {"path": official.get("metric_script"), "sha256": official.get("metric_script_sha256")},
+        ),
+        "eval_config": verified_file(
+            "official eval config",
+            {"path": official.get("eval_config"), "sha256": official.get("eval_config_sha256")},
+        ),
+    }
+    evaluation_snapshot = payload.get("evaluation_code_snapshot", {})
+    evaluation_root = Path(evaluation_snapshot.get("path", "")).expanduser().resolve()
+    verified_implementation = {}
+    for relative_path, expected_sha256 in evaluation_snapshot.get("implementation_sha256", {}).items():
+        verified_implementation[relative_path] = verified_file(
+            f"evaluation implementation {relative_path}",
+            {"path": evaluation_root / relative_path, "sha256": expected_sha256},
+        )
+    if not verified_implementation:
+        raise RuntimeError("Frozen snapshot audit has no evaluation implementation hashes")
 
     base_model = common.resolved(dependencies["base_model"])
     if not Path(base_model).exists():
@@ -113,11 +231,17 @@ def load_snapshot_audit(path):
         "weights": weights,
         "base_model": base_model,
         "dependencies": verified_dependencies,
+        "official": official,
         "output": {
             "path": str(path),
             "sha256": sha256_file(path),
             "status": payload.get("status"),
-            "evaluation_code_snapshot": payload.get("evaluation_code_snapshot"),
+            "evaluation_code_snapshot": {
+                "path": str(evaluation_root),
+                "git_commit": evaluation_snapshot.get("git_commit"),
+                "implementation": verified_implementation,
+            },
+            "official_protocol_files": verified_official,
             "dependencies": {"base_model": base_model, **verified_dependencies},
             "weight_sha256": {label: item["sha256"] for label, item in weights.items()},
         },
@@ -139,6 +263,16 @@ def validate_manifest_against_snapshot(manifest, snapshot):
     }
     if mismatches:
         raise RuntimeError(f"Command manifest differs from frozen dependency paths: {mismatches}")
+    manifest_official = manifest.get("official_evaluation", {})
+    official_mismatches = {
+        key: {"actual": value, "expected": snapshot["official"].get(key)}
+        for key, value in manifest_official.items()
+        if snapshot["official"].get(key) != value
+    }
+    if official_mismatches:
+        raise RuntimeError(
+            f"Command manifest differs from frozen official protocol: {official_mismatches}"
+        )
 
 
 def validate_server_logs(manifest):
@@ -380,6 +514,7 @@ def main():
     output_json = Path(args.output_json).expanduser().resolve() if args.output_json else results_root / "comparison_summary.json"
     output_csv = Path(args.output_csv).expanduser().resolve() if args.output_csv else results_root / "comparison_summary.csv"
     snapshot = load_snapshot_audit(args.snapshot_audit)
+    task_catalog = load_task_catalog_audit(args.task_catalog_audit)
     weights = {}
     reference = None
     for label, directory, adapter in args.weight:
@@ -400,10 +535,17 @@ def main():
             reference = validated["reference"]
         weights[label] = validated["output"]
 
+    if task_catalog is not None:
+        if reference["task_counts"] != task_catalog["task_counts"]:
+            raise RuntimeError("Completed suite task counts differ from the task catalog audit")
+        if sum(reference["task_counts"].values()) != task_catalog["total_tasks"]:
+            raise RuntimeError("Completed task total differs from the task catalog audit")
+
     payload = {
         "generated_at": common.utc_now(),
         "results_root": str(results_root),
         "snapshot_audit": snapshot["output"] if snapshot is not None else None,
+        "task_catalog_audit": task_catalog["output"] if task_catalog is not None else None,
         "verification": {
             "weights_verified": list(weights),
             "all_suites_and_tasks_complete": True,
@@ -411,6 +553,8 @@ def main():
             "official_protocol_and_implementation_match": True,
             "shared_policy_lazy_prompt_cache_verified": True,
             "checkpoint_and_dependency_hashes_match_snapshot": snapshot is not None,
+            "evaluation_and_official_hashes_match_snapshot": snapshot is not None,
+            "libero_task_resources_match_baseline": task_catalog is not None,
             "physical_cuda_devices": [1, 2, 3, 4, 5, 6, 7],
             "episodes_per_task": common.EPISODES_PER_TASK,
             "total_tasks_per_weight": sum(reference["task_counts"].values()),
