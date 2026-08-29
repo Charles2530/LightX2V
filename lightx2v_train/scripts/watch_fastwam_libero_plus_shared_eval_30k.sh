@@ -7,9 +7,10 @@ RUN_SCRIPT="$ROOT/lightx2v_train/scripts/run_fastwam_libero_plus_shared_eval_30k
 RUN_SESSION=fastwam_libero_plus_shared_official
 LAUNCH_LOG="$RESULTS/shared_official_launcher.log"
 WATCHDOG_LOG="$RESULTS/shared_watchdog.log"
-PROTOCOL_DIRECTORY=official_protocol_shared_policy
+PROTOCOL_DIRECTORY=${PROTOCOL_DIRECTORY:-official_protocol_shared_policy}
 LORA_SUMMARY="$RESULTS/lora_only_30k/$PROTOCOL_DIRECTORY/summary.json"
-JOINT_ADAPTER="$ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_joint/exports/checkpoint-000030000-student.pt"
+ARTIFACT_ROOT=${ARTIFACT_ROOT:-$ROOT}
+JOINT_ADAPTER="$ARTIFACT_ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_joint/exports/checkpoint-000030000-student.pt"
 COMPARISON_SUMMARY="$RESULTS/comparison_summary.json"
 
 comparison_complete() {
