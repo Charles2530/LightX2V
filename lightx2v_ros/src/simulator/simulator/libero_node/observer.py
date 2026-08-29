@@ -1,5 +1,7 @@
 import os
 import sys
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 import numpy as np
@@ -81,6 +83,39 @@ def load_init_state(get_libero_path, task, init_state_id):
     return init_states[index], len(init_states)
 
 
+def load_task_init_states(task_suite, task_id):
+    """Load states through the benchmark so LIBERO-plus can resolve perturbation tasks."""
+    import torch
+
+    torch_load = torch.load
+
+    def load_trusted_init_states(*args, **kwargs):
+        kwargs.setdefault("map_location", "cpu")
+        kwargs.setdefault("weights_only", False)
+        return torch_load(*args, **kwargs)
+
+    # LIBERO-plus predates the PyTorch 2.6 weights_only default change.
+    torch.load = load_trusted_init_states
+    try:
+        init_states = task_suite.get_task_init_states(int(task_id))
+    finally:
+        torch.load = torch_load
+    if hasattr(init_states, "detach"):
+        init_states = init_states.detach().cpu().numpy()
+    init_states = np.asarray(init_states)
+    if init_states.ndim == 1:
+        init_states = init_states.reshape(1, -1)
+    if len(init_states) == 0:
+        raise ValueError(f"Task {task_id} has no initial states")
+    return init_states
+
+
+def create_task_suite(factory):
+    # LIBERO-plus prints thousands of task ids every time a suite is instantiated.
+    with redirect_stdout(StringIO()):
+        return factory()
+
+
 def build_task_catalog(benchmark_module):
     """Return stable UI task ids mapped to their LIBERO suite/task metadata."""
     factories = benchmark_module.get_benchmark_dict()
@@ -89,7 +124,7 @@ def build_task_catalog(benchmark_module):
         factory = factories.get(benchmark_name)
         if factory is None:
             continue
-        task_suite = factory()
+        task_suite = create_task_suite(factory)
         for task_id in range(task_suite.get_num_tasks()):
             task = task_suite.get_task(task_id)
             key = f"{benchmark_name}/{task_id}"
@@ -120,7 +155,8 @@ class LiberoActionObserver:
         factories = benchmark.get_benchmark_dict()
         if self.benchmark_name not in factories or self.benchmark_name not in LIBERO_BENCHMARKS:
             raise ValueError(f"unknown LIBERO benchmark {benchmark_name!r}; available: {', '.join(LIBERO_BENCHMARKS)}")
-        task_suite = factories[self.benchmark_name]()
+        task_suite = create_task_suite(factories[self.benchmark_name])
+        self.task_suite = task_suite
         self.task_id = int(task_id)
         if self.task_id < 0 or self.task_id >= task_suite.get_num_tasks():
             raise ValueError(f"task_id {self.task_id} is out of range for {self.benchmark_name!r}; expected 0..{task_suite.get_num_tasks() - 1}")
@@ -130,9 +166,9 @@ class LiberoActionObserver:
         bddl_file = Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
         # Keep an owned copy: every restart must restore this exact MuJoCo state,
         # rather than returning the observation cached after the last action.
-        self.init_state_id = int(init_state_id)
-        init_state, self.num_init_states = load_init_state(get_libero_path, task, self.init_state_id)
-        self.init_state = np.asarray(init_state).copy()
+        self.init_states = load_task_init_states(task_suite, self.task_id)
+        self.num_init_states = len(self.init_states)
+        self.set_init_state_id(init_state_id)
         self.image_size = int(image_size)
         self.seed = int(seed)
 
@@ -148,6 +184,16 @@ class LiberoActionObserver:
     @property
     def task_key(self):
         return f"{self.benchmark_name}/{self.task_id}"
+
+    def set_init_state_id(self, init_state_id):
+        index = int(init_state_id)
+        if index < 0 or index >= self.num_init_states:
+            raise ValueError(
+                f"init_state_id {index} is out of range for {self.task.name!r}; "
+                f"expected 0..{self.num_init_states - 1}"
+            )
+        self.init_state_id = index
+        self.init_state = self.init_states[index].copy()
 
     def reset(self):
         """Reset simulator internals and restore the configured initial state."""
