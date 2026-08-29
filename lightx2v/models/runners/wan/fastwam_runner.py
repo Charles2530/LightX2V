@@ -1,5 +1,6 @@
 import json
 import os
+import gc
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -149,6 +150,8 @@ class FastWAMPolicy:
         self.config = config
         self._check_model_config()
         self.pending_actions = deque()
+        self._prompt_cache = {}
+        self.text_encoder_released = False
 
         self.state_normalizer, self.action_normalizer = self._load_normalizers()
         self.text_encoder = self._load_text_encoder()
@@ -324,6 +327,11 @@ class FastWAMPolicy:
         return latents.to(device=self.device, dtype=GET_DTYPE())
 
     def encode_prompt(self, prompt):
+        cached = self._prompt_cache.get(prompt)
+        if cached is not None:
+            return cached
+        if self.text_encoder is None:
+            raise RuntimeError(f"FastWAM prompt was not cached before releasing the text encoder: {prompt!r}")
         ids, mask = self.text_encoder.tokenizer([prompt], return_mask=True, add_special_tokens=True)
         ids = ids.to(self.device)
         mask = mask.to(self.device)
@@ -333,10 +341,33 @@ class FastWAMPolicy:
         for i, seq_len in enumerate(seq_lens):
             context[i, seq_len:] = 0
         mask = torch.ones_like(mask, dtype=torch.bool)
-        return context[0].to(device=self.device, dtype=GET_DTYPE()), mask[0].to(device=self.device)
+        encoded = (
+            context[0].to(device=self.device, dtype=GET_DTYPE()),
+            mask[0].to(device=self.device),
+        )
+        self._prompt_cache[prompt] = encoded
+        return encoded
+
+    def preload_task_prompts(self, task_descriptions, release_text_encoder=False):
+        for task_description in dict.fromkeys(str(item) for item in task_descriptions):
+            prompt = self.default_prompt.format(task_prompt=task_description)
+            self.encode_prompt(prompt)
+        if release_text_encoder:
+            self.release_text_encoder()
+        return len(self._prompt_cache)
+
+    def release_text_encoder(self):
+        if self.text_encoder is None:
+            return
+        self.text_encoder = None
+        self.text_encoder_released = True
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
     def close(self):
         self.pending_actions.clear()
+        self._prompt_cache.clear()
 
 
 @RUNNER_REGISTER("fastwam")

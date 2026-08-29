@@ -10,6 +10,7 @@ MODEL_PATH=/mnt/afs_1/charles/models/Wan2.2-TI2V-5B
 POLICY_CONFIG="$ROOT/configs/fastwam/libero_plus_i2va_dmd_1step.json"
 DATASET_STATS=/mnt/afs_1/charles/models/fastwam/libero_uncond_2cam224_dataset_stats.json
 LIBERO_ROOT=/mnt/afs_1/charles/codes/LIBERO-plus
+PROTOCOL_DIRECTORY=official_protocol_prompt_cache
 SCRIPT_ARGS=("$@")
 
 evaluate_adapter() {
@@ -17,16 +18,17 @@ evaluate_adapter() {
     local adapter=$2
     "$PYTHON" "$EVALUATOR" \
         --adapter "$adapter" \
-        --output-root "$OUTPUT_ROOT/$label/official_protocol" \
+        --output-root "$OUTPUT_ROOT/$label/$PROTOCOL_DIRECTORY" \
         --model-path "$MODEL_PATH" \
         --policy-config "$POLICY_CONFIG" \
         --dataset-stats "$DATASET_STATS" \
         --libero-root "$LIBERO_ROOT" \
         --devices 1 2 3 4 5 6 7 \
-        --workers-per-device 3 \
+        --workers-per-device 4 \
         --episodes-per-task 50 \
         --tasks-per-shard 10 \
         --seed 0 \
+        --release-text-encoder-after-prompt-cache \
         "${SCRIPT_ARGS[@]}"
 }
 
@@ -51,9 +53,10 @@ else
         > "$OUTPUT_ROOT/joint_30k/PENDING.txt"
 fi
 
-if [[ -f "$OUTPUT_ROOT/joint_30k/official_protocol/summary.json" ]]; then
+if [[ -f "$OUTPUT_ROOT/joint_30k/$PROTOCOL_DIRECTORY/summary.json" ]]; then
     "$PYTHON" "$AGGREGATOR" \
         --results-root "$OUTPUT_ROOT" \
+        --protocol-directory "$PROTOCOL_DIRECTORY" \
         --weight native native /mnt/afs_1/charles/models/fastwam/libero_uncond_2cam224.pt \
         --weight old_success_baseline_30k old_success_baseline_30k \
             "$ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_16gpu_mbs48_nogc/exports/checkpoint-000030000-student.pt" \

@@ -61,6 +61,8 @@ def parse_args():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--expected-action-infer-steps", type=int, default=1)
+    parser.add_argument("--release-text-encoder-after-prompt-cache", action="store_true")
+    parser.add_argument("--ready-file", help="Write a readiness marker after model and prompt initialization")
     return parser.parse_args()
 
 
@@ -111,6 +113,16 @@ def discover_task_counts(libero_root, benchmarks):
             raise ValueError(f"Benchmark {benchmark!r} is not registered by {libero_root}")
         counts[benchmark] = create_task_suite(factories[benchmark]).get_num_tasks()
     return counts
+
+
+def load_task_descriptions(libero_root, task_ids_by_benchmark):
+    benchmark_module, _, _ = load_libero(Path(libero_root).expanduser().resolve())
+    factories = benchmark_module.get_benchmark_dict()
+    descriptions = []
+    for benchmark, task_ids in task_ids_by_benchmark.items():
+        task_suite = create_task_suite(factories[benchmark])
+        descriptions.extend(task_suite.get_task(task_id).language for task_id in task_ids)
+    return descriptions
 
 
 def quat_to_axis_angle(quat):
@@ -244,6 +256,7 @@ def build_run_signature(args, task_ids_by_benchmark, official_protocol, implemen
         "render_size": args.render_size,
         "seed": args.seed,
         "expected_action_infer_steps": args.expected_action_infer_steps,
+        "release_text_encoder_after_prompt_cache": args.release_text_encoder_after_prompt_cache,
         "official_evaluation": official_protocol,
         "fastwam_evaluation_implementation": implementation,
     }
@@ -304,6 +317,10 @@ def main():
     np.random.seed(args.seed)
     metadata, classification_path = load_task_metadata(args.libero_root)
     policy, policy_config = build_policy(args)
+    prompt_cache_size = policy.preload_task_prompts(
+        load_task_descriptions(args.libero_root, task_ids_by_benchmark),
+        release_text_encoder=args.release_text_encoder_after_prompt_cache,
+    )
     configured_wait_steps = int(policy_config.get("num_steps_wait", 0))
     action_infer_steps = int(policy.action_infer_steps)
     if action_infer_steps != args.expected_action_infer_steps:
@@ -331,6 +348,8 @@ def main():
         "actions_per_plan": int(policy.actions_per_plan),
         "action_chunk_size": int(policy.action_chunk_size),
         "configured_num_steps_wait_ignored": configured_wait_steps,
+        "prompt_cache_size": prompt_cache_size,
+        "text_encoder_released": policy.text_encoder_released,
         "official_evaluation": official_protocol,
         "fastwam_evaluation_implementation": implementation,
         "max_policy_steps": args.max_steps or official_protocol["max_policy_steps"],
@@ -346,6 +365,18 @@ def main():
     }
     expected_episode_ids = range(args.episode_offset, args.episode_offset + args.episodes_per_task)
     atomic_json_dump(results, args.output)
+    if args.ready_file:
+        atomic_json_dump(
+            {
+                "ready_at": utc_now(),
+                "pid": os.getpid(),
+                "output": resolved(args.output),
+                "prompt_cache_size": prompt_cache_size,
+                "text_encoder_released": policy.text_encoder_released,
+                "action_infer_steps": action_infer_steps,
+            },
+            args.ready_file,
+        )
 
     try:
         for benchmark in args.benchmarks:

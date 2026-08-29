@@ -21,6 +21,7 @@ MAX_POLICY_STEPS = 600
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-root", required=True)
+    parser.add_argument("--protocol-directory", default="official_protocol")
     parser.add_argument(
         "--weight",
         action="append",
@@ -139,8 +140,8 @@ def shard_wall_time(protocol_root, expected_shards):
     }
 
 
-def validate_weight(label, result_dir, expected_adapter, reference):
-    protocol_root = result_dir / "official_protocol"
+def validate_weight(label, result_dir, expected_adapter, reference, protocol_directory):
+    protocol_root = result_dir / protocol_directory
     summary_path = protocol_root / "summary.json"
     commands_path = protocol_root / "commands.json"
     if not summary_path.is_file() or not commands_path.is_file():
@@ -322,7 +323,13 @@ def main():
         result_dir = Path(directory)
         if not result_dir.is_absolute():
             result_dir = results_root / result_dir
-        validated = validate_weight(label, result_dir.resolve(), adapter, reference)
+        validated = validate_weight(
+            label,
+            result_dir.resolve(),
+            adapter,
+            reference,
+            args.protocol_directory,
+        )
         if reference is None:
             reference = validated["reference"]
         weights[label] = validated["output"]

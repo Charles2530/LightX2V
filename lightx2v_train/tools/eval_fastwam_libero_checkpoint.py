@@ -65,6 +65,7 @@ def parse_args():
     parser.add_argument("--render-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--expected-action-infer-steps", type=int, default=1)
+    parser.add_argument("--release-text-encoder-after-prompt-cache", action="store_true")
     parser.add_argument("--force-export", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Write command manifests without launching shards")
     return parser.parse_args()
@@ -149,6 +150,7 @@ def expected_shard_signature(args, adapter, shard):
         "render_size": args.render_size,
         "seed": args.seed,
         "expected_action_infer_steps": args.expected_action_infer_steps,
+        "release_text_encoder_after_prompt_cache": args.release_text_encoder_after_prompt_cache,
         "official_evaluation": official_protocol,
         "fastwam_evaluation_implementation": implementation,
     }
@@ -213,7 +215,7 @@ def export_student(args, checkpoint, iteration, output_root):
     return export_path
 
 
-def build_eval_command(args, adapter, output_path, shard, device):
+def build_eval_command(args, adapter, output_path, shard, device, ready_path):
     command = [
         sys.executable,
         str(Path(__file__).with_name("eval_fastwam_libero.py")),
@@ -245,7 +247,11 @@ def build_eval_command(args, adapter, output_path, shard, device):
         str(args.expected_action_infer_steps),
         "--device",
         "cuda:0",
+        "--ready-file",
+        str(ready_path),
     ]
+    if args.release_text_encoder_after_prompt_cache:
+        command.append("--release-text-encoder-after-prompt-cache")
     if args.max_steps:
         command.extend(["--max-steps", str(args.max_steps)])
     return command
@@ -264,6 +270,7 @@ def write_command_manifest(args, adapter, output_root, task_counts, shards):
         device, worker_index = worker_slots[index % len(worker_slots)]
         visible_devices = str(device) if device == 0 else f"{device},0"
         output = output_root / "shards" / f"{shard.name}.json"
+        ready_path = output_root / ".worker_ready" / f"{shard.name}.json"
         commands.append(
             {
                 "shard": shard.name,
@@ -271,7 +278,7 @@ def write_command_manifest(args, adapter, output_root, task_counts, shards):
                 "worker_index": worker_index,
                 "cuda_visible_devices": visible_devices,
                 "mujoco_egl_device_id": "0",
-                "command": shlex.join(build_eval_command(args, adapter, output, shard, device)),
+                "command": shlex.join(build_eval_command(args, adapter, output, shard, device, ready_path)),
             }
         )
     manifest = {
@@ -291,6 +298,7 @@ def write_command_manifest(args, adapter, output_root, task_counts, shards):
         "render_size": args.render_size,
         "seed": args.seed,
         "expected_action_infer_steps": args.expected_action_infer_steps,
+        "release_text_encoder_after_prompt_cache": args.release_text_encoder_after_prompt_cache,
         "official_evaluation": official_protocol,
         "fastwam_evaluation_implementation": implementation,
         "devices": args.devices,
@@ -309,10 +317,10 @@ def write_command_manifest(args, adapter, output_root, task_counts, shards):
 
 
 def stop_active_processes(active):
-    for process, _, _, _ in active.values():
+    for process, _, _, _, _ in active.values():
         if process.poll() is None:
             process.terminate()
-    for process, log, _, _ in active.values():
+    for process, log, _, _, ready_path in active.values():
         if process.poll() is None:
             try:
                 process.wait(timeout=10)
@@ -320,11 +328,14 @@ def stop_active_processes(active):
                 process.kill()
                 process.wait()
         log.close()
+        ready_path.unlink(missing_ok=True)
 
 
 def run_shards(args, adapter, output_root, shards):
     shards_dir = output_root / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
+    ready_dir = output_root / ".worker_ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
     pending = [
         shard
         for shard in shards
@@ -342,14 +353,27 @@ def run_shards(args, adapter, output_root, shards):
     active = {}
     try:
         while pending or active:
-            free_slots = [slot for slot in worker_slots if slot not in active]
-            for device, worker_index in free_slots:
+            loading_devices = {
+                device
+                for (device, _), (process, _, _, _, ready_path) in active.items()
+                if process.poll() is None and not ready_path.is_file()
+            }
+            launch_slots = []
+            for device in devices:
+                if device in loading_devices:
+                    continue
+                free_slots = [slot for slot in worker_slots if slot[0] == device and slot not in active]
+                if free_slots:
+                    launch_slots.append(free_slots[0])
+            for device, worker_index in launch_slots:
                 if not pending:
                     break
                 shard = pending.pop(0)
                 output_path = shards_dir / f"{shard.name}.json"
                 log_path = shards_dir / f"{shard.name}.log"
-                command = build_eval_command(args, adapter, output_path, shard, device)
+                ready_path = ready_dir / f"{shard.name}.json"
+                ready_path.unlink(missing_ok=True)
+                command = build_eval_command(args, adapter, output_path, shard, device, ready_path)
                 visible_devices = str(device) if device == 0 else f"{device},0"
                 log = log_path.open("a", encoding="utf-8")
                 log.write(
@@ -368,7 +392,7 @@ def run_shards(args, adapter, output_root, shards):
                     }
                 )
                 process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=env)
-                active[(device, worker_index)] = (process, log, shard, log_path)
+                active[(device, worker_index)] = (process, log, shard, log_path, ready_path)
                 print(
                     f"[launch] physical_device={device} worker={worker_index} "
                     f"shard={shard.name} pid={process.pid}",
@@ -376,11 +400,12 @@ def run_shards(args, adapter, output_root, shards):
                 )
 
             time.sleep(1)
-            for slot, (process, log, shard, log_path) in list(active.items()):
+            for slot, (process, log, shard, log_path, ready_path) in list(active.items()):
                 return_code = process.poll()
                 if return_code is None:
                     continue
                 log.close()
+                ready_path.unlink(missing_ok=True)
                 del active[slot]
                 if return_code:
                     raise RuntimeError(
