@@ -7,13 +7,17 @@ RUN_SCRIPT="$ROOT/lightx2v_train/scripts/run_fastwam_libero_plus_shared_eval_30k
 RUN_SESSION=fastwam_libero_plus_shared_official
 LAUNCH_LOG="$RESULTS/shared_official_launcher.log"
 WATCHDOG_LOG="$RESULTS/shared_watchdog.log"
+PYTHON=${PYTHON:-/mnt/afs_1/charles/env/miniconda3/envs/lightx2v_libero_plus/bin/python}
 PROTOCOL_DIRECTORY=${PROTOCOL_DIRECTORY:-official_protocol_shared_policy}
 LORA_SUMMARY="$RESULTS/lora_only_30k/$PROTOCOL_DIRECTORY/summary.json"
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-$ROOT}
 JOINT_ADAPTER="$ARTIFACT_ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_joint/exports/checkpoint-000030000-student.pt"
 COMPARISON_SUMMARY="$RESULTS/comparison_summary.json"
+PROGRESS_TOOL="$ROOT/lightx2v_train/tools/report_fastwam_libero_shared_progress.py"
+PROGRESS_OUTPUT="$RESULTS/LIVE_PROGRESS.json"
 STALL_TIMEOUT_SECONDS=${STALL_TIMEOUT_SECONDS:-3600}
 PROGRESS_CHECK_SECONDS=${PROGRESS_CHECK_SECONDS:-60}
+PROGRESS_REPORT_INTERVAL_SECONDS=${PROGRESS_REPORT_INTERVAL_SECONDS:-3600}
 
 latest_progress_epoch() {
     local latest
@@ -55,10 +59,22 @@ PY
 }
 
 last_progress_at=$(date +%s)
+last_report_at=0
 
 while ! comparison_complete; do
     if tmux has-session -t "$RUN_SESSION" 2>/dev/null; then
         now=$(date +%s)
+        if (( now - last_report_at >= PROGRESS_REPORT_INTERVAL_SECONDS )); then
+            if "$PYTHON" "$PROGRESS_TOOL" \
+                --results-root "$RESULTS" \
+                --protocol-directory "$PROTOCOL_DIRECTORY" \
+                --output "$PROGRESS_OUTPUT" >> "$WATCHDOG_LOG" 2>&1; then
+                last_report_at=$now
+            else
+                printf '[%s] failed to refresh %s\n' \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PROGRESS_OUTPUT" >> "$WATCHDOG_LOG"
+            fi
+        fi
         latest=$(latest_progress_epoch)
         if (( latest > last_progress_at )); then
             last_progress_at=$latest
