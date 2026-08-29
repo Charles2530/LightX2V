@@ -166,7 +166,8 @@ def _path(value):
 def _build_dataset(config, split):
     shape_meta = _resolve_shape_meta(config)
     num_frames = int(config.get("num_frames", 33))
-    processor = FastWAMProcessor(shape_meta, num_frames)
+    observation_only_video = bool(config.get("observation_only_video", False))
+    processor = FastWAMProcessor(shape_meta, 1 if observation_only_video else num_frames)
     dataset_dirs = _dataset_roots(config)
 
     dataset = RobotVideoDataset(
@@ -184,6 +185,7 @@ def _build_dataset(config, split):
         skip_padding_as_possible=bool(config.get("skip_padding_as_possible", False)),
         max_padding_retry=int(config.get("max_padding_retry", 3)),
         video_backend=config.get("video_backend"),
+        observation_only_video=observation_only_video,
     )
     logger.info("[data] built LIBERO FastWAM {} dataset size={}", split, len(dataset))
     return DatasetSliceRepeat(

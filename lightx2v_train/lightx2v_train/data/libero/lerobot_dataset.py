@@ -71,6 +71,7 @@ class LiberoLeRobotDataset(Dataset):
         is_training_set=True,
         seed=42,
         video_backend=None,
+        observation_only_video=False,
     ):
         if num_frames < 2:
             raise ValueError(f"num_frames must be at least 2, got {num_frames}")
@@ -80,6 +81,7 @@ class LiberoLeRobotDataset(Dataset):
         self.num_frames = int(num_frames)
         self.global_sample_stride = int(global_sample_stride)
         self.video_backend = video_backend
+        self.observation_only_video = bool(observation_only_video)
 
         episodes = []
         fps_values = set()
@@ -162,7 +164,8 @@ class LiberoLeRobotDataset(Dataset):
 
         state, state_is_pad, observation_indices = self._window(data[self.state_key], frame_index, self.num_frames)
         action, action_is_pad, _ = self._window(data[self.action_key], frame_index, self.num_frames - 1)
-        timestamps = data["timestamp"][observation_indices].float().tolist()
+        video_observation_indices = observation_indices[:1] if self.observation_only_video else observation_indices
+        timestamps = data["timestamp"][video_observation_indices].float().tolist()
         tolerance = max(1e-4, 1.0 / self.fps - 1e-4)
         images = {
             key: decode_video_frames(
@@ -183,5 +186,5 @@ class LiberoLeRobotDataset(Dataset):
             "images": {key.removeprefix("observation.images."): value for key, value in images.items()},
             "action_is_pad": action_is_pad,
             "state_is_pad": state_is_pad,
-            "image_is_pad": state_is_pad.clone(),
+            "image_is_pad": state_is_pad[:1].clone() if self.observation_only_video else state_is_pad.clone(),
         }

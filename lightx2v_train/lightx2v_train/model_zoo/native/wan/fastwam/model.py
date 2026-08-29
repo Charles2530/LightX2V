@@ -373,6 +373,57 @@ class FastWAM(torch.nn.Module):
         }
 
     @torch.no_grad()
+    def build_action_distill_inputs(self, sample, tiled: bool = False):
+        """Build the observation-only condition used by the deployed action policy."""
+        video = sample["video"]
+        context = sample.get("context")
+        context_mask = sample.get("context_mask")
+        action = sample.get("action")
+        if video.ndim != 5 or video.shape[1] != 3:
+            raise ValueError(f"`sample['video']` must be [B,3,T,H,W], got {tuple(video.shape)}")
+        if context is None or context_mask is None:
+            raise ValueError("FastWAM action distillation requires `context` and `context_mask`.")
+        if context.ndim != 3 or context_mask.ndim != 2:
+            raise ValueError(f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}")
+        if action is None or action.ndim != 3:
+            raise ValueError("FastWAM action distillation requires `action` with shape [B,T,D].")
+        batch_size = video.shape[0]
+        if context.shape[0] != batch_size or context_mask.shape[0] != batch_size or action.shape[0] != batch_size:
+            raise ValueError("FastWAM action distillation inputs must have the same batch size.")
+        if action.shape[2] != self.action_expert.action_dim:
+            raise ValueError(f"Expected action dim {self.action_expert.action_dim}, got {action.shape[2]}.")
+
+        input_image = video[:, :, :1].to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+        first_frame_latents = self._encode_video_latents(input_image, tiled=tiled)
+        context = context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+        context_mask = context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True)
+        proprio = sample.get("proprio")
+        if self.proprio_encoder is not None:
+            if proprio is None or proprio.ndim != 3:
+                raise ValueError("FastWAM action distillation requires `proprio` with shape [B,T,D].")
+            if proprio.shape[0] != batch_size or proprio.shape[2] != self.proprio_dim:
+                raise ValueError(f"Expected proprio shape [B,T,{self.proprio_dim}], got {tuple(proprio.shape)}.")
+            context, context_mask = self._append_proprio_to_context(
+                context,
+                context_mask,
+                proprio[:, 0].to(device=self.device, dtype=self.torch_dtype, non_blocking=True),
+            )
+
+        action = action.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+        action_is_pad = sample.get("action_is_pad")
+        if action_is_pad is not None:
+            if action_is_pad.shape != action.shape[:2]:
+                raise ValueError(f"`action_is_pad` shape must be {tuple(action.shape[:2])}, got {tuple(action_is_pad.shape)}")
+            action_is_pad = action_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
+        return {
+            "context": context,
+            "context_mask": context_mask,
+            "first_frame_latents": first_frame_latents,
+            "action": action,
+            "action_is_pad": action_is_pad,
+        }
+
+    @torch.no_grad()
     def _build_mot_attention_mask(
         self,
         video_seq_len: int,

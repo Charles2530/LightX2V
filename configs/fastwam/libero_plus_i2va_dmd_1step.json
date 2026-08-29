@@ -1,6 +1,6 @@
 {
-  "adapter_model_path": "/data/nvme7/yongyang/fastwam_release/libero_uncond_2cam224.pt",
-  "dataset_stats_path": "/data/nvme7/yongyang/fastwam_release/libero_uncond_2cam224_dataset_stats.json",
+  "adapter_model_path": "/path/to/fastwam_libero_action_1step_dmd.pt",
+  "dataset_stats_path": "/path/to/libero_uncond_2cam224_dataset_stats.json",
   "vae_stride": [4, 8, 8],
   "patch_size": [1, 2, 2],
   "dim": 3072,
@@ -12,7 +12,7 @@
   "action_chunk_size": 32,
   "actions_per_plan": 10,
   "num_steps_wait": 30,
-  "action_infer_steps": 20,
+  "action_infer_steps": 1,
   "action_sample_shift": 5.0,
   "action_dim_hidden": 1024,
   "action_dim": 7,

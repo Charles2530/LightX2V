@@ -1,0 +1,107 @@
+model:
+  name: wan_fastwam
+  running_dtype: bf16
+  model_path: /mnt/afs_1/charles/codes/LightX2V_fastwam/models/Wan2.2-TI2V-5B
+  checkpoint_path: /mnt/afs_1/charles/codes/LightX2V_fastwam/models/fastwam/libero_uncond_2cam224.pt
+
+data:
+  train: &libero_data
+    name: libero_fastwam_dataset
+    dataset_dirs:
+      - /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/libero_mujoco3.3.2/libero_spatial_no_noops_lerobot
+      - /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/libero_mujoco3.3.2/libero_object_no_noops_lerobot
+      - /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
+      - /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/libero_mujoco3.3.2/libero_10_no_noops_lerobot
+    pretrained_norm_stats: /mnt/afs_1/charles/codes/LightX2V_fastwam/models/fastwam/libero_uncond_2cam224_dataset_stats.json
+    text_embedding_cache_dir: /mnt/afs_1/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_libero_assets/text_embeds_cache
+    observation_only_video: true
+    val_set_proportion: 0.01
+    batch_size: 48
+    num_workers: 8
+  val:
+    <<: *libero_data
+    batch_size: 4
+
+training:
+  method: fastwam_action_dmd
+  output_dir: runs/fastwam_libero_action_1step_dmd_lora_only
+  max_train_iters: 30000
+  gradient_accumulation_iters: 1
+  gradient_checkpointing: false
+  max_grad_norm: 1.0
+  save_every_iters: 2000
+  save_total_limit: 3
+  save_final: true
+  lr_scheduler: cosine
+  lr_warmup_iters: 500
+  student:
+    train_type: lora
+    lora:
+      rank: 64
+      alpha: 64
+      dropout: 0.0
+      target_modules: [q, k, v, o, ffn.0, ffn.2]
+      # True LoRA-only training: all high-leverage dense paths stay equal to
+      # the native teacher throughout training.
+      modules_to_save: []
+    optimizer:
+      learning_rate: 1.0e-4
+      weight_decay: 1.0e-2
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_epsilon: 1.0e-8
+  fake:
+    train_type: lora
+    lora:
+      rank: 64
+      alpha: 64
+      dropout: 0.0
+      target_modules: [q, k, v, o, ffn.0, ffn.2]
+      modules_to_save: []
+    optimizer:
+      learning_rate: 1.0e-4
+      weight_decay: 1.0e-2
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_epsilon: 1.0e-8
+  action_dmd:
+    generator_steps: 1
+    teacher_steps: 20
+    # Put the endpoint-to-DMD transition exactly on a retained checkpoint.
+    # At global batch 768 this is about 2.8 passes over the training split.
+    endpoint_warmup_iters: 1000
+    # Warmup internally uses endpoint weight 1; after step 1k the objective is
+    # DMD-only, keeping this run interpretable without inventing a mixed weight.
+    endpoint_loss_weight: 0.0
+    dmd_loss_weight: 1.0
+    fake_loss_weight: 1.0
+    fake_update_ratio: 1
+    sigma_min: 0.02
+    sigma_max: 0.98
+    norm_clip_min: 0.01
+
+inference:
+  infer_every_iters: 500
+  num_samples: 16
+  seed: 42
+
+logging:
+  train_log_every_iters: 10
+  wandb:
+    enable: true
+    project: fastwam-action-dmd
+    name: libero-action-1step-dmd-lora-only
+    group: libero-action-1step-dmd
+    job_type: train
+    tags: [fastwam, libero, action-dmd, endpoint-to-dmd, 1step, pure-lora, lora-only, 30k]
+
+resume:
+  auto_resume: false
+  resume_ckpt_path: null
+
+distributed:
+  backend: nccl
+  zero1:
+    enabled: false
+  sequence_parallel:
+    enabled: false

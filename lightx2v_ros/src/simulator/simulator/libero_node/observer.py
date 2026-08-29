@@ -31,19 +31,22 @@ def setup_libero_config(libero_root):
     config_dir = Path.home() / ".cache" / "lightx2v_ros" / "libero_config"
     config_file = config_dir / "config.yaml"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(
-        "\n".join(
-            [
-                f"benchmark_root: {benchmark_root}",
-                f"bddl_files: {benchmark_root / 'bddl_files'}",
-                f"init_states: {benchmark_root / 'init_files'}",
-                f"datasets: {libero_root / 'libero' / 'datasets'}",
-                f"assets: {benchmark_root / 'assets'}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
+    contents = "\n".join(
+        [
+            f"benchmark_root: {benchmark_root}",
+            f"bddl_files: {benchmark_root / 'bddl_files'}",
+            f"init_states: {benchmark_root / 'init_files'}",
+            f"datasets: {libero_root / 'libero' / 'datasets'}",
+            f"assets: {benchmark_root / 'assets'}",
+            "",
+        ]
     )
+    temporary = config_file.with_name(f".{config_file.name}.tmp-{os.getpid()}")
+    try:
+        temporary.write_text(contents, encoding="utf-8")
+        os.replace(temporary, config_file)
+    finally:
+        temporary.unlink(missing_ok=True)
     os.environ["LIBERO_CONFIG_PATH"] = str(config_dir)
 
 

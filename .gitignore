@@ -41,3 +41,5 @@ lightx2v_train/datasets
 lightx2v_train/models
 lightx2v_train/runs/
 models
+
+.uv

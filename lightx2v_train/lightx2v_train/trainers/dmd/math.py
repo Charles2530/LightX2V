@@ -53,20 +53,35 @@ def dmd_loss(
     x_pred_fake_flow,
     x_pred_teacher,
     norm_clip_min=None,
+    mask=None,
 ):
     """Compute the detached DMD regression objective."""
     with torch.no_grad():
         grad = x_pred_fake_flow - x_pred_teacher
         dims = tuple(range(1, latents.ndim))
-        normalizer = torch.abs(latents - x_pred_teacher).mean(dim=dims, keepdim=True)
+        if mask is None:
+            normalizer = torch.abs(latents - x_pred_teacher).mean(dim=dims, keepdim=True)
+        else:
+            expanded_mask = mask.to(device=latents.device, dtype=latents.dtype)
+            while expanded_mask.ndim < latents.ndim:
+                expanded_mask = expanded_mask.unsqueeze(-1)
+            expanded_mask = expanded_mask.expand_as(latents)
+            denominator = expanded_mask.sum(dim=dims, keepdim=True).clamp(min=1.0)
+            normalizer = (torch.abs(latents - x_pred_teacher) * expanded_mask).sum(dim=dims, keepdim=True) / denominator
         if norm_clip_min is not None:
             normalizer = normalizer.clamp(min=float(norm_clip_min))
         grad = torch.nan_to_num(grad / normalizer)
-    return 0.5 * F.mse_loss(
-        latents.float(),
-        (latents.float() - grad.float()).detach(),
-        reduction="mean",
-    )
+    target = (latents.float() - grad.float()).detach()
+    if mask is None:
+        return 0.5 * F.mse_loss(latents.float(), target, reduction="mean")
+    expanded_mask = mask.to(device=latents.device, dtype=torch.float32)
+    while expanded_mask.ndim < latents.ndim:
+        expanded_mask = expanded_mask.unsqueeze(-1)
+    expanded_mask = expanded_mask.expand_as(latents)
+    squared_error = (latents.float() - target).pow(2) * expanded_mask
+    reduce_dims = tuple(range(1, squared_error.ndim))
+    valid_per_sample = expanded_mask.sum(dim=reduce_dims).clamp(min=1.0)
+    return 0.5 * (squared_error.sum(dim=reduce_dims) / valid_per_sample).mean()
 
 
 def dmd_loss_pair(

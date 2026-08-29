@@ -321,6 +321,7 @@ class MoT(nn.Module):
         video_kv_cache: list[dict[str, torch.Tensor]],
         attention_mask: torch.Tensor,
         video_seq_len: int,
+        action_expert: Optional[nn.Module] = None,
     ) -> torch.Tensor:
         """Run action branch with cached video K/V instead of recomputing video tokens.
 
@@ -334,11 +335,12 @@ class MoT(nn.Module):
             video_kv_cache: Layer-wise cached video K/V from `prefill_video_cache`.
             attention_mask: Joint [video+action] mask, shape [Sv+Sa, Sv+Sa].
             video_seq_len: Video token count `Sv` in the joint sequence prefix.
+            action_expert: Optional action expert override used by distillation roles.
 
         Returns:
             Updated action tokens after all layers, shape [B, Sa, D].
         """
-        if "action" not in self.mixtures:
+        if action_expert is None and "action" not in self.mixtures:
             raise ValueError("MoT requires `action` expert for `forward_action_with_video_cache`.")
         if len(video_kv_cache) != self.num_layers:
             raise ValueError(f"`video_kv_cache` must contain {self.num_layers} layers, got {len(video_kv_cache)}.")
@@ -354,7 +356,9 @@ class MoT(nn.Module):
         # Use the action query rows from the joint [video+action] mask.
         action_attention_mask = attention_mask[video_seq_len:total_seq_len, :total_seq_len]
 
-        expert = self.mixtures["action"]
+        expert = self.mixtures["action"] if action_expert is None else action_expert
+        if len(expert.blocks) != self.num_layers:
+            raise ValueError(f"Action expert must contain {self.num_layers} blocks, got {len(expert.blocks)}.")
         x = action_tokens
         for layer_idx in range(self.num_layers):
             block = expert.blocks[layer_idx]

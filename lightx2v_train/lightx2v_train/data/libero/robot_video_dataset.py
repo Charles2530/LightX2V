@@ -29,6 +29,7 @@ class RobotVideoDataset(Dataset):
         skip_padding_as_possible=False,
         max_padding_retry=3,
         video_backend=None,
+        observation_only_video=False,
     ):
         image_keys = [f"observation.images.{item['key']}" for item in shape_meta["images"]]
         self.lerobot_dataset = LiberoLeRobotDataset(
@@ -41,6 +42,7 @@ class RobotVideoDataset(Dataset):
             val_set_proportion=val_set_proportion,
             is_training_set=is_training_set,
             video_backend=video_backend,
+            observation_only_video=observation_only_video,
         )
         self.num_frames = int(num_frames)
         self.action_video_freq_ratio = int(action_video_freq_ratio)
@@ -48,7 +50,7 @@ class RobotVideoDataset(Dataset):
             raise ValueError("num_frames - 1 must be divisible by action_video_freq_ratio")
         if ((self.num_frames - 1) // self.action_video_freq_ratio) % 4:
             raise ValueError("The number of future video frames must be divisible by the VAE temporal factor 4")
-        self.video_sample_indices = list(range(0, self.num_frames, self.action_video_freq_ratio))
+        self.video_sample_indices = [0] if observation_only_video else list(range(0, self.num_frames, self.action_video_freq_ratio))
         self.context_len = int(context_len)
         self.text_embedding_cache_dir = os.path.abspath(os.path.expanduser(text_embedding_cache_dir))
         self.skip_padding_as_possible = bool(skip_padding_as_possible)

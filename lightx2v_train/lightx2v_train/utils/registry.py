@@ -93,6 +93,7 @@ _TRAINER_MODULES = {
     "dmd": "lightx2v_train.trainers.dmd.trainer",
     "dopsd": "lightx2v_train.trainers.dopsd",
     "fastwam": "lightx2v_train.trainers.fastwam",
+    "fastwam_action_dmd": "lightx2v_train.trainers.fastwam_action_dmd.trainer",
     "flow": "lightx2v_train.trainers.flow",
     "lingbot_video_dmd": "lightx2v_train.trainers.dmd.video_trainer",
     "ltx_t2av_ar_dmd": "lightx2v_train.trainers.dmd.ltx_trainer",

@@ -50,6 +50,7 @@ dependencies = [
     "omegaconf",
     "peft",
     "swanlab",
+    "wandb",
     "qtorch",
     "ftfy",
     "gradio",
