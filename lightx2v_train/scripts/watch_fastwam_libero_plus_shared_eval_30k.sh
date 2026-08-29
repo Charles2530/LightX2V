@@ -4,6 +4,7 @@ set -uo pipefail
 ROOT=/mnt/afs_1/charles/codes/LightX2V_fastwam
 RESULTS=/mnt/afs_1/charles/codes/LIBERO-plus/eval_results/fastwam_1step_30k
 REPORT_ROOT=${REPORT_ROOT:-$ROOT}
+EVAL_ROOT=${EVAL_ROOT:-$REPORT_ROOT}
 RUN_SCRIPT="$REPORT_ROOT/lightx2v_train/scripts/run_fastwam_libero_plus_shared_eval_30k.sh"
 RUN_SESSION=fastwam_libero_plus_shared_official
 LAUNCH_LOG="$RESULTS/shared_official_launcher.log"
@@ -24,6 +25,17 @@ STALL_TIMEOUT_SECONDS=${STALL_TIMEOUT_SECONDS:-3600}
 PROGRESS_CHECK_SECONDS=${PROGRESS_CHECK_SECONDS:-60}
 PROGRESS_REPORT_INTERVAL_SECONDS=${PROGRESS_REPORT_INTERVAL_SECONDS:-3600}
 
+# tmux sessions inherit the tmux server environment, which may predate this watchdog.
+tmux set-environment -g REPORT_ROOT "$REPORT_ROOT"
+tmux set-environment -g EVAL_ROOT "$EVAL_ROOT"
+tmux set-environment -g ARTIFACT_ROOT "$ARTIFACT_ROOT"
+tmux set-environment -g PROTOCOL_DIRECTORY "$PROTOCOL_DIRECTORY"
+tmux set-environment -g SNAPSHOT_AUDIT "$SNAPSHOT_AUDIT"
+tmux set-environment -g PYTHON "$PYTHON"
+if [[ -n "${NVIDIA_EGL_ROOT:-}" ]]; then
+    tmux set-environment -g NVIDIA_EGL_ROOT "$NVIDIA_EGL_ROOT"
+fi
+
 latest_progress_epoch() {
     local latest
     latest=$(find "$RESULTS" -type f \
@@ -43,6 +55,49 @@ stop_one_policy_server() {
     pgid=$(ps -o pgid= -p "$pid" | tr -d ' ')
     [[ -n "$pgid" ]] || return 1
     kill -TERM -- "-$pgid"
+}
+
+latest_launch_failed() {
+    local log=$1
+    awk '
+        /^\[[^]]+\] .*eval_fastwam_libero_shared_policy\.py/ {
+            seen = 1
+            failed = 0
+        }
+        seen && /Traceback \(most recent call last\):/ { failed = 1 }
+        seen && /CUDA out of memory/ { failed = 1 }
+        seen && /ConnectionResetError/ { failed = 1 }
+        seen && /BrokenPipeError/ { failed = 1 }
+        seen && /Shared policy inference failed:/ { failed = 1 }
+        seen && /RuntimeError: Environment worker .* exited with/ { failed = 1 }
+        END { exit !(seen && failed) }
+    ' "$log"
+}
+
+failed_policy_server_pgid() {
+    local pid device output_root log pgid index
+    local -a argv
+    while read -r pid; do
+        [[ -r "/proc/$pid/cmdline" && -r "/proc/$pid/environ" ]] || continue
+        mapfile -d '' -t argv < "/proc/$pid/cmdline"
+        output_root=
+        for ((index = 0; index + 1 < ${#argv[@]}; index++)); do
+            if [[ "${argv[index]}" == "--output-root" ]]; then
+                output_root=${argv[index + 1]}
+                break
+            fi
+        done
+        [[ -n "$output_root" ]] || continue
+        device=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^CUDA_VISIBLE_DEVICES=//p')
+        [[ "$device" =~ ^[0-9]+$ ]] || continue
+        log="$output_root/server-cuda-$device.log"
+        if [[ -f "$log" ]] && latest_launch_failed "$log"; then
+            pgid=$(ps -o pgid= -p "$pid" | tr -d ' ')
+            [[ -n "$pgid" ]] && printf '%s\n' "$pgid"
+            return 0
+        fi
+    done < <(pgrep -f "[e]val_fastwam_libero_shared_policy.py.*$PROTOCOL_DIRECTORY" || true)
+    return 1
 }
 
 comparison_complete() {
@@ -132,6 +187,15 @@ last_report_at=0
 while ! comparison_complete; do
     if tmux has-session -t "$RUN_SESSION" 2>/dev/null; then
         now=$(date +%s)
+        if failed_pgid=$(failed_policy_server_pgid); then
+            printf '[%s] policy server group %s reported an unrecovered worker error; restarting %s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$failed_pgid" "$RUN_SESSION" \
+                >> "$WATCHDOG_LOG"
+            kill -TERM -- "-$failed_pgid" 2>/dev/null || true
+            last_progress_at=$now
+            sleep "$PROGRESS_CHECK_SECONDS"
+            continue
+        fi
         if (( now - last_report_at >= PROGRESS_REPORT_INTERVAL_SECONDS )); then
             if "$PYTHON" "$PROGRESS_TOOL" \
                 --results-root "$RESULTS" \
