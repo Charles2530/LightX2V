@@ -41,6 +41,10 @@ def parse_args():
     parser.add_argument("--expected-actions-per-plan", type=int, default=10)
     parser.add_argument("--prompt-cache-limit", type=int, default=256)
     parser.add_argument("--startup-timeout", type=int, default=900)
+    parser.add_argument(
+        "--nvidia-egl-root",
+        help="Extracted NVIDIA driver root containing matching GLVND EGL libraries",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -63,6 +67,35 @@ def atomic_json_dump(payload, path):
     os.replace(temporary, path)
 
 
+def resolve_nvidia_egl_runtime(path):
+    if not path:
+        return None
+    root = Path(path).expanduser().resolve()
+    library_dir = root / "usr" / "lib" / "x86_64-linux-gnu"
+    vendor_json = root / "usr" / "share" / "glvnd" / "egl_vendor.d" / "10_nvidia.json"
+    required = {
+        "egl_vendor_json": vendor_json,
+        "libegl_nvidia": library_dir / "libEGL_nvidia.so.0",
+        "libnvidia_eglcore": next(iter(sorted(library_dir.glob("libnvidia-eglcore.so.*"))), None),
+        "libnvidia_glsi": next(iter(sorted(library_dir.glob("libnvidia-glsi.so.*"))), None),
+    }
+    missing = [
+        name for name, candidate in required.items() if candidate is None or not candidate.is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(f"NVIDIA EGL root {root} is missing required files: {missing}")
+    vendor = json.loads(vendor_json.read_text(encoding="utf-8"))
+    if vendor.get("ICD", {}).get("library_path") != "libEGL_nvidia.so.0":
+        raise RuntimeError(f"Unexpected NVIDIA EGL vendor manifest: {vendor_json}")
+    return {
+        "name": "nvidia-egl",
+        "root": str(root),
+        "library_dir": str(library_dir),
+        "physical_device_rule": "MUJOCO_EGL_DEVICE_ID equals physical CUDA device index",
+        "files": {name: shared_eval.file_record(candidate) for name, candidate in required.items()},
+    }
+
+
 def validate_args(args):
     if not Path(args.adapter).expanduser().is_file():
         raise FileNotFoundError(args.adapter)
@@ -81,6 +114,7 @@ def validate_args(args):
         raise ValueError("--max-steps cannot be negative")
     if args.expected_action_infer_steps != 1:
         raise ValueError("This evaluation requires action_infer_steps=1")
+    args.nvidia_egl_runtime = resolve_nvidia_egl_runtime(args.nvidia_egl_root)
 
 
 def server_command(args, device_index, assignment_index, output_root, ready_path):
@@ -132,8 +166,10 @@ def server_command(args, device_index, assignment_index, output_root, ready_path
         command.extend(["--task-ids", *(str(task_id) for task_id in args.task_ids)])
     if args.max_steps:
         command.extend(["--max-steps", str(args.max_steps)])
+    if args.nvidia_egl_runtime is not None:
+        return command, str(device_index), str(device_index)
     visible_devices = str(device_index) if device_index == 0 else f"{device_index},0"
-    return command, visible_devices
+    return command, visible_devices, "0"
 
 
 def build_manifest(args, output_root, selected_tasks, shards, commands, official, implementation):
@@ -162,6 +198,7 @@ def build_manifest(args, output_root, selected_tasks, shards, commands, official
         "text_encoder_released": False,
         "devices": list(args.devices),
         "env_workers_per_device": args.env_workers_per_device,
+        "render_backend": args.nvidia_egl_runtime or {"name": "system-egl"},
         "official_evaluation": official,
         "fastwam_evaluation_implementation": implementation,
         "launcher_implementation": {
@@ -197,6 +234,34 @@ def stop_servers(active):
         item["log"].close()
 
 
+def server_environment(args, item):
+    env = os.environ.copy()
+    env.update(
+        {
+            "CUDA_VISIBLE_DEVICES": item["cuda_visible_devices"],
+            "MUJOCO_GL": "egl",
+            "PYOPENGL_PLATFORM": "egl",
+            "MUJOCO_EGL_DEVICE_ID": item["mujoco_egl_device_id"],
+            "PYTHONPATH": os.pathsep.join(
+                [str(ROOT / "lightx2v_train"), str(ROOT), env.get("PYTHONPATH", "")]
+            ).rstrip(os.pathsep),
+        }
+    )
+    runtime = args.nvidia_egl_runtime
+    if runtime is not None:
+        env.update(
+            {
+                "NVIDIA_EGL_ROOT": runtime["root"],
+                "EGL_PLATFORM": "surfaceless",
+                "__EGL_VENDOR_LIBRARY_FILENAMES": runtime["files"]["egl_vendor_json"]["path"],
+                "LD_LIBRARY_PATH": os.pathsep.join(
+                    [runtime["library_dir"], env.get("LD_LIBRARY_PATH", "")]
+                ).rstrip(os.pathsep),
+            }
+        )
+    return env
+
+
 def launch_servers(args, output_root, command_items):
     ready_dir = output_root / ".server_ready"
     ready_dir.mkdir(parents=True, exist_ok=True)
@@ -209,18 +274,7 @@ def launch_servers(args, output_root, command_items):
             log = log_path.open("a", encoding="utf-8")
             log.write(f"\n[{utc_now()}] {item['command']}\n")
             log.flush()
-            env = os.environ.copy()
-            env.update(
-                {
-                    "CUDA_VISIBLE_DEVICES": item["cuda_visible_devices"],
-                    "MUJOCO_GL": "egl",
-                    "PYOPENGL_PLATFORM": "egl",
-                    "MUJOCO_EGL_DEVICE_ID": "0",
-                    "PYTHONPATH": os.pathsep.join(
-                        [str(ROOT / "lightx2v_train"), str(ROOT), env.get("PYTHONPATH", "")]
-                    ).rstrip(os.pathsep),
-                }
-            )
+            env = server_environment(args, item)
             process = subprocess.Popen(
                 item["argv"],
                 stdout=log,
@@ -278,8 +332,14 @@ def aggregate_results(args, output_root, selected_tasks, shards, manifest, offic
     records = {}
     protocols = []
     shards_dir = output_root / "shards"
-    for shard in shards:
+    commands = {int(item["physical_cuda_device"]): item for item in manifest["commands"]}
+    expected_render = {
+        device: shared_eval.render_environment(server_environment(args, command))
+        for device, command in commands.items()
+    }
+    for shard_index, shard in enumerate(shards):
         path = shards_dir / f"{shard['name']}.json"
+        assigned_device = args.devices[shard_index % len(args.devices)]
         if not shared_eval.shard_is_complete(
             path,
             shard,
@@ -287,6 +347,7 @@ def aggregate_results(args, output_root, selected_tasks, shards, manifest, offic
             official,
             implementation,
             args.expected_actions_per_plan,
+            expected_render[assigned_device],
         ):
             raise RuntimeError(f"Missing, incomplete, or mismatched result shard: {path}")
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -370,12 +431,14 @@ def main():
     for assignment_index, device in enumerate(args.devices):
         ready_path = ready_dir / f"cuda-{device}.json"
         log_path = output_root / f"server-cuda-{device}.log"
-        argv, visible_devices = server_command(args, device, assignment_index, output_root, ready_path)
+        argv, visible_devices, egl_device_id = server_command(
+            args, device, assignment_index, output_root, ready_path
+        )
         item = {
             "physical_cuda_device": device,
             "assignment_index": assignment_index,
             "cuda_visible_devices": visible_devices,
-            "mujoco_egl_device_id": "0",
+            "mujoco_egl_device_id": egl_device_id,
             "ready_file": str(ready_path),
             "log": str(log_path),
             "argv": argv,

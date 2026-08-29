@@ -31,6 +31,15 @@ for path in (TOOLS_ROOT, ROOT, SIMULATOR_SRC):
         sys.path.insert(0, str(path))
 
 DEFAULT_BENCHMARKS = ("libero_spatial", "libero_object", "libero_goal", "libero_10")
+RENDER_ENVIRONMENT_KEYS = (
+    "MUJOCO_GL",
+    "PYOPENGL_PLATFORM",
+    "EGL_PLATFORM",
+    "CUDA_VISIBLE_DEVICES",
+    "MUJOCO_EGL_DEVICE_ID",
+    "NVIDIA_EGL_ROOT",
+    "__EGL_VENDOR_LIBRARY_FILENAMES",
+)
 
 
 def parse_args():
@@ -82,6 +91,11 @@ def file_record(path):
     path = Path(path).resolve()
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return {"path": str(path), "sha256": digest}
+
+
+def render_environment(environment=None):
+    environment = os.environ if environment is None else environment
+    return {key.lower(): environment.get(key) for key in RENDER_ENVIRONMENT_KEYS}
 
 
 def evaluation_implementation():
@@ -225,7 +239,13 @@ def summarize(episodes):
     }
 
 
-def shard_run_signature(args, shard, official_protocol, implementation):
+def shard_run_signature(
+    args,
+    shard,
+    official_protocol,
+    implementation,
+    render_environment_override=None,
+):
     return {
         "adapter": resolved(args.adapter),
         "config": resolved(args.config),
@@ -242,6 +262,11 @@ def shard_run_signature(args, shard, official_protocol, implementation):
         "expected_action_infer_steps": args.expected_action_infer_steps,
         "official_evaluation": official_protocol,
         "fastwam_evaluation_implementation": implementation,
+        "render_environment": (
+            render_environment()
+            if render_environment_override is None
+            else render_environment_override
+        ),
         "shared_policy": {
             "transport": "multiprocessing-queues-v1",
             "actions_per_plan": None,
@@ -250,7 +275,15 @@ def shard_run_signature(args, shard, official_protocol, implementation):
     }
 
 
-def shard_is_complete(path, shard, args, official_protocol, implementation, actions_per_plan):
+def shard_is_complete(
+    path,
+    shard,
+    args,
+    official_protocol,
+    implementation,
+    actions_per_plan,
+    render_environment_override=None,
+):
     path = Path(path)
     if not path.is_file():
         return False
@@ -258,7 +291,13 @@ def shard_is_complete(path, shard, args, official_protocol, implementation, acti
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    expected_signature = shard_run_signature(args, shard, official_protocol, implementation)
+    expected_signature = shard_run_signature(
+        args,
+        shard,
+        official_protocol,
+        implementation,
+        render_environment_override,
+    )
     expected_signature["shared_policy"]["actions_per_plan"] = int(actions_per_plan)
     if not payload.get("finished_at") or payload.get("run_signature") != expected_signature:
         return False
@@ -489,6 +528,7 @@ def build_protocol(args, policy, policy_config, official_protocol, implementatio
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "physical_cuda_device": physical_device,
         "mujoco_egl_device_id": os.environ.get("MUJOCO_EGL_DEVICE_ID"),
+        "render_environment": render_environment(),
         "python_executable": sys.executable,
         "python_version": sys.version.split()[0],
         "seed": args.seed,

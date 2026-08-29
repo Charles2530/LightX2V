@@ -224,6 +224,24 @@ def load_snapshot_audit(path):
     if not verified_implementation:
         raise RuntimeError("Frozen snapshot audit has no evaluation implementation hashes")
 
+    render_backend = payload.get("render_backend")
+    verified_render_files = {}
+    if render_backend is not None:
+        if render_backend.get("name") != "nvidia-egl":
+            raise RuntimeError(f"Unexpected frozen render backend: {render_backend.get('name')}")
+        for name, expected in render_backend.get("files", {}).items():
+            verified_render_files[name] = verified_file(f"render backend {name}", expected)
+        required_render_files = {
+            "egl_vendor_json",
+            "libegl_nvidia",
+            "libnvidia_eglcore",
+            "libnvidia_glsi",
+        }
+        if set(verified_render_files) != required_render_files:
+            raise RuntimeError(
+                f"Frozen render backend has unexpected files: {sorted(verified_render_files)}"
+            )
+
     base_model = common.resolved(dependencies["base_model"])
     if not Path(base_model).exists():
         raise FileNotFoundError(f"Missing frozen base model: {base_model}")
@@ -232,6 +250,7 @@ def load_snapshot_audit(path):
         "base_model": base_model,
         "dependencies": verified_dependencies,
         "official": official,
+        "render_backend": render_backend,
         "output": {
             "path": str(path),
             "sha256": sha256_file(path),
@@ -242,6 +261,11 @@ def load_snapshot_audit(path):
                 "implementation": verified_implementation,
             },
             "official_protocol_files": verified_official,
+            "render_backend": (
+                {**render_backend, "files": verified_render_files}
+                if render_backend is not None
+                else None
+            ),
             "dependencies": {"base_model": base_model, **verified_dependencies},
             "weight_sha256": {label: item["sha256"] for label, item in weights.items()},
         },
@@ -273,6 +297,10 @@ def validate_manifest_against_snapshot(manifest, snapshot):
         raise RuntimeError(
             f"Command manifest differs from frozen official protocol: {official_mismatches}"
         )
+    if snapshot["render_backend"] is not None and manifest.get("render_backend") != snapshot[
+        "render_backend"
+    ]:
+        raise RuntimeError("Command manifest differs from frozen render backend")
 
 
 def validate_server_logs(manifest):
@@ -347,13 +375,29 @@ def validate_episode_outcome(label, key, episode):
         raise RuntimeError(f"{label} failed episode {key} did not exhaust the official horizon")
 
 
-def validate_shards(protocol_root, expected_shards, official, implementation):
+def expected_render_environment(manifest, command):
+    backend = manifest.get("render_backend", {})
+    if backend.get("name") != "nvidia-egl":
+        return None
+    return {
+        "mujoco_gl": "egl",
+        "pyopengl_platform": "egl",
+        "egl_platform": "surfaceless",
+        "cuda_visible_devices": command["cuda_visible_devices"],
+        "mujoco_egl_device_id": command["mujoco_egl_device_id"],
+        "nvidia_egl_root": backend["root"],
+        "__egl_vendor_library_filenames": backend["files"]["egl_vendor_json"]["path"],
+    }
+
+
+def validate_shards(protocol_root, expected_shards, official, implementation, manifest):
     paths = sorted((protocol_root / "shards").glob("*.json"))
     if len(paths) != expected_shards:
         raise RuntimeError(f"{protocol_root} has {len(paths)} shards, expected {expected_shards}")
     starts = []
     finishes = []
     physical_devices = set()
+    commands = {int(item["physical_cuda_device"]): item for item in manifest["commands"]}
     for path in paths:
         payload = common.load_json(path)
         if not payload.get("finished_at"):
@@ -370,6 +414,10 @@ def validate_shards(protocol_root, expected_shards, official, implementation):
         ):
             raise RuntimeError(f"Shared-policy protocol mismatch in {path}")
         physical_devices.add(int(protocol["physical_cuda_device"]))
+        physical_device = int(protocol["physical_cuda_device"])
+        expected_render = expected_render_environment(manifest, commands[physical_device])
+        if expected_render is not None and protocol.get("render_environment") != expected_render:
+            raise RuntimeError(f"NVIDIA EGL render environment mismatch in {path}")
         starts.append(parse_timestamp(payload["started_at"]))
         finishes.append(parse_timestamp(payload["finished_at"]))
     if physical_devices != {1, 2, 3, 4, 5, 6, 7}:
@@ -487,7 +535,9 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
     if reference is not None and episode_keys != set(initial_states):
         raise RuntimeError(f"{label} episode catalog differs from native")
 
-    wall_clock = validate_shards(protocol_root, expected_shards, official, implementation)
+    wall_clock = validate_shards(
+        protocol_root, expected_shards, official, implementation, manifest
+    )
     logs = validate_server_logs(manifest)
     return {
         "reference": {

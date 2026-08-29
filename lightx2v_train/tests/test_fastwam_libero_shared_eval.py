@@ -11,6 +11,7 @@ TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
+import eval_fastwam_libero_shared_checkpoint as shared_checkpoint
 import eval_fastwam_libero_shared_policy as shared_eval
 
 
@@ -121,3 +122,93 @@ def test_complete_shard_requires_exact_signature_catalog_and_protocol(tmp_path):
     payload["protocol"]["seed"] = 1
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert not shared_eval.shard_is_complete(path, shard, args, official, implementation, 10)
+
+    payload["protocol"]["seed"] = 0
+    payload["run_signature"]["render_environment"] = {"mujoco_gl": "egl"}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert shared_eval.shard_is_complete(
+        path,
+        shard,
+        args,
+        official,
+        implementation,
+        10,
+        {"mujoco_gl": "egl"},
+    )
+
+
+def test_shard_signature_tracks_render_environment(tmp_path, monkeypatch):
+    args = SimpleNamespace(
+        adapter=str(tmp_path / "adapter.pt"),
+        config=str(tmp_path / "config.json"),
+        model_path=str(tmp_path / "model"),
+        dataset_stats=str(tmp_path / "stats.json"),
+        libero_root=str(tmp_path / "libero"),
+        episodes_per_task=1,
+        episode_offset=0,
+        max_steps=0,
+        render_size=256,
+        seed=0,
+        expected_action_infer_steps=1,
+        prompt_cache_limit=32,
+    )
+    shard = {"benchmark": "libero_spatial", "task_ids": (0,)}
+    monkeypatch.setenv("NVIDIA_EGL_ROOT", "/egl-a")
+    first = shared_eval.shard_run_signature(args, shard, {}, {})
+    monkeypatch.setenv("NVIDIA_EGL_ROOT", "/egl-b")
+    second = shared_eval.shard_run_signature(args, shard, {}, {})
+    assert first != second
+    assert first["render_environment"]["nvidia_egl_root"] == "/egl-a"
+
+
+def test_nvidia_egl_server_environment_uses_physical_device(tmp_path, monkeypatch):
+    root = tmp_path / "egl"
+    library_dir = root / "usr" / "lib" / "x86_64-linux-gnu"
+    vendor_dir = root / "usr" / "share" / "glvnd" / "egl_vendor.d"
+    library_dir.mkdir(parents=True)
+    vendor_dir.mkdir(parents=True)
+    (vendor_dir / "10_nvidia.json").write_text(
+        json.dumps({"ICD": {"library_path": "libEGL_nvidia.so.0"}}), encoding="utf-8"
+    )
+    for name in ("libEGL_nvidia.so.0", "libnvidia-eglcore.so.1", "libnvidia-glsi.so.1"):
+        (library_dir / name).write_text(name, encoding="utf-8")
+    runtime = shared_checkpoint.resolve_nvidia_egl_runtime(root)
+    args = SimpleNamespace(nvidia_egl_runtime=runtime)
+    item = {
+        "cuda_visible_devices": "7",
+        "mujoco_egl_device_id": "7",
+    }
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/existing")
+    env = shared_checkpoint.server_environment(args, item)
+    assert env["CUDA_VISIBLE_DEVICES"] == "7"
+    assert env["MUJOCO_EGL_DEVICE_ID"] == "7"
+    assert env["EGL_PLATFORM"] == "surfaceless"
+    assert env["LD_LIBRARY_PATH"].split(":") == [str(library_dir), "/existing"]
+    assert env["__EGL_VENDOR_LIBRARY_FILENAMES"] == str(vendor_dir / "10_nvidia.json")
+
+    command_args = SimpleNamespace(
+        policy_config=tmp_path / "policy.json",
+        adapter=tmp_path / "adapter.pt",
+        model_path=tmp_path / "model",
+        dataset_stats=tmp_path / "stats.json",
+        libero_root=tmp_path / "libero",
+        benchmarks=["libero_spatial"],
+        episodes_per_task=1,
+        episode_offset=0,
+        tasks_per_shard=1,
+        render_size=256,
+        seed=0,
+        expected_action_infer_steps=1,
+        expected_actions_per_plan=10,
+        env_workers_per_device=1,
+        prompt_cache_limit=1,
+        task_ids=[0],
+        max_steps=0,
+        devices=[7],
+        nvidia_egl_runtime=runtime,
+    )
+    _, visible_devices, egl_device_id = shared_checkpoint.server_command(
+        command_args, 7, 0, tmp_path / "output", tmp_path / "ready.json"
+    )
+    assert visible_devices == "7"
+    assert egl_device_id == "7"

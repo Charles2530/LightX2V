@@ -189,3 +189,54 @@ def test_detects_failed_episode_before_horizon():
     progress.audit_episode(episode, reference, violations)
 
     assert violations == {"failure_not_at_horizon": 1}
+
+
+def test_detects_nvidia_egl_render_environment_mismatch(tmp_path):
+    results_root = tmp_path / "results"
+    protocol_root = results_root / "native" / "protocol"
+    vendor = tmp_path / "10_nvidia.json"
+    render_backend = {
+        "name": "nvidia-egl",
+        "root": "/egl",
+        "files": {"egl_vendor_json": {"path": str(vendor)}},
+    }
+    manifest = {
+        "adapter": "/models/native.pt",
+        "task_counts": {"libero_spatial": 1},
+        "episodes_per_task": 50,
+        "seed": 0,
+        "expected_action_infer_steps": 1,
+        "expected_actions_per_plan": 10,
+        "official_evaluation": {"initialization_steps": 5, "max_policy_steps": 600},
+        "fastwam_evaluation_implementation": {},
+        "render_backend": render_backend,
+        "commands": [
+            {
+                "physical_cuda_device": 1,
+                "cuda_visible_devices": "1",
+                "mujoco_egl_device_id": "1",
+            }
+        ],
+    }
+    write_json(protocol_root / "commands.json", manifest)
+    write_json(
+        protocol_root / "shards" / "shard.json",
+        {
+            "run_signature": {"adapter": manifest["adapter"]},
+            "protocol": {
+                "action_infer_steps": 1,
+                "actions_per_plan": 10,
+                "seed": 0,
+                "physical_cuda_device": "1",
+                "official_evaluation": manifest["official_evaluation"],
+                "fastwam_evaluation_implementation": {},
+                "render_environment": {},
+            },
+            "episodes": [],
+        },
+    )
+
+    report = progress.build_report(results_root, "protocol", (("native", "native"),))
+    native = report["weights"]["native"]
+    assert native["partial_invariant_violations"] == {"render_environment": 1}
+    assert native["partial_invariants_valid"] is False

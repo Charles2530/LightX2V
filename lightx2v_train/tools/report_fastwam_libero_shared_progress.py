@@ -71,6 +71,11 @@ def expected_reference(results_root, protocol_directory, weights):
                 "actions_per_plan": int(manifest.get("expected_actions_per_plan", 10)),
                 "official_evaluation": manifest.get("official_evaluation"),
                 "implementation": manifest.get("fastwam_evaluation_implementation"),
+                "render_backend": manifest.get("render_backend"),
+                "render_commands": {
+                    int(item["physical_cuda_device"]): item
+                    for item in manifest.get("commands", [])
+                },
             }
     return {
         "task_counts": {},
@@ -80,6 +85,8 @@ def expected_reference(results_root, protocol_directory, weights):
         "actions_per_plan": 10,
         "official_evaluation": None,
         "implementation": None,
+        "render_backend": None,
+        "render_commands": {},
     }
 
 
@@ -145,6 +152,26 @@ def audit_protocol(payload, manifest, reference, violations):
         "adapter"
     ):
         violations["adapter"] += 1
+    render_backend = reference.get("render_backend") or {}
+    if render_backend.get("name") == "nvidia-egl":
+        physical_device = int(protocol.get("physical_cuda_device", -1))
+        command = reference["render_commands"].get(physical_device)
+        if command is None:
+            violations["render_physical_device"] += 1
+        else:
+            expected_render = {
+                "mujoco_gl": "egl",
+                "pyopengl_platform": "egl",
+                "egl_platform": "surfaceless",
+                "cuda_visible_devices": command["cuda_visible_devices"],
+                "mujoco_egl_device_id": command["mujoco_egl_device_id"],
+                "nvidia_egl_root": render_backend["root"],
+                "__egl_vendor_library_filenames": render_backend["files"][
+                    "egl_vendor_json"
+                ]["path"],
+            }
+            if protocol.get("render_environment") != expected_render:
+                violations["render_environment"] += 1
 
 
 def report_weight(label, result_dir, protocol_directory, reference):

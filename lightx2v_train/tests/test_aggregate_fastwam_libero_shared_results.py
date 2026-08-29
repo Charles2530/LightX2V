@@ -112,7 +112,7 @@ def write_json(path, payload):
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def make_weight(results_root, label, adapter):
+def make_weight(results_root, label, adapter, render_backend=None):
     protocol_root = results_root / label / "official_protocol_shared_policy"
     metric_path = results_root / "metric.py"
     metric_sha256 = aggregate.sha256_file(metric_path) if metric_path.is_file() else "metric-hash"
@@ -168,6 +168,8 @@ def make_weight(results_root, label, adapter):
         commands.append(
             {
                 "physical_cuda_device": device,
+                "cuda_visible_devices": str(device),
+                "mujoco_egl_device_id": str(device),
                 "log": str(log.resolve()),
                 "command": command,
             }
@@ -189,6 +191,7 @@ def make_weight(results_root, label, adapter):
         "prompt_cache_mode": "lazy-lru",
         "text_encoder_released": False,
         "devices": list(range(1, 8)),
+        "render_backend": render_backend,
         "official_evaluation": official,
         "fastwam_evaluation_implementation": implementation,
         "commands": commands,
@@ -223,6 +226,21 @@ def make_weight(results_root, label, adapter):
                     "prompt_cache_mode": "lazy-lru",
                     "text_encoder_released": False,
                     "physical_cuda_device": index + 1,
+                    "render_environment": (
+                        {
+                            "mujoco_gl": "egl",
+                            "pyopengl_platform": "egl",
+                            "egl_platform": "surfaceless",
+                            "cuda_visible_devices": str(index + 1),
+                            "mujoco_egl_device_id": str(index + 1),
+                            "nvidia_egl_root": render_backend["root"],
+                            "__egl_vendor_library_filenames": render_backend["files"][
+                                "egl_vendor_json"
+                            ]["path"],
+                        }
+                        if render_backend is not None
+                        else None
+                    ),
                     "official_evaluation": official,
                     "fastwam_evaluation_implementation": implementation,
                 },
@@ -242,12 +260,34 @@ def test_verifies_four_shared_policy_weights(tmp_path, monkeypatch):
     official_config = results_root / "eval.yaml"
     official_metric.write_text("metric", encoding="utf-8")
     official_config.write_text("max_steps: 600", encoding="utf-8")
+    render_root = results_root / "nvidia-egl"
+    render_files = {}
+    for name in (
+        "egl_vendor_json",
+        "libegl_nvidia",
+        "libnvidia_eglcore",
+        "libnvidia_glsi",
+    ):
+        path = render_root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(name, encoding="utf-8")
+        render_files[name] = {
+            "path": str(path.resolve()),
+            "sha256": aggregate.sha256_file(path),
+        }
+    render_backend = {
+        "name": "nvidia-egl",
+        "root": str(render_root.resolve()),
+        "library_dir": str(render_root.resolve()),
+        "physical_device_rule": "MUJOCO_EGL_DEVICE_ID equals physical CUDA device index",
+        "files": render_files,
+    }
     weights = []
     frozen_weights = []
     labels = ("native", "old_success_baseline_30k", "lora_only_30k", "joint_30k")
     for label in labels:
         adapter = tmp_path / f"{label}.pt"
-        make_weight(results_root, label, adapter)
+        make_weight(results_root, label, adapter, render_backend)
         weights.extend(["--weight", label, label, str(adapter)])
         frozen_weights.append(
             {
@@ -278,6 +318,7 @@ def test_verifies_four_shared_policy_weights(tmp_path, monkeypatch):
                 "eval_config": str(official_config),
                 "eval_config_sha256": aggregate.sha256_file(official_config),
             },
+            "render_backend": render_backend,
             "dependencies": {
                 "base_model": str((results_root / "model").resolve()),
                 "dataset_stats": {

@@ -18,6 +18,7 @@ MODEL_PATH=/mnt/afs_1/charles/models/Wan2.2-TI2V-5B
 POLICY_CONFIG="$EVAL_ROOT/configs/fastwam/libero_plus_i2va_dmd_1step.json"
 DATASET_STATS=/mnt/afs_1/charles/models/fastwam/libero_uncond_2cam224_dataset_stats.json
 LIBERO_ROOT=/mnt/afs_1/charles/codes/LIBERO-plus
+NVIDIA_EGL_ROOT=${NVIDIA_EGL_ROOT:-/mnt/afs_1/charles/env/nvidia-egl-550.90.07/root}
 PROTOCOL_DIRECTORY=${PROTOCOL_DIRECTORY:-official_protocol_shared_policy}
 SCRIPT_ARGS=("$@")
 
@@ -40,6 +41,7 @@ evaluate_adapter() {
         --expected-actions-per-plan 10 \
         --prompt-cache-limit 256 \
         --startup-timeout 3600 \
+        --nvidia-egl-root "$NVIDIA_EGL_ROOT" \
         "${SCRIPT_ARGS[@]}"
 }
 
