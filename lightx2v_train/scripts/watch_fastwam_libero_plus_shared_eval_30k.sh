@@ -3,7 +3,8 @@ set -uo pipefail
 
 ROOT=/mnt/afs_1/charles/codes/LightX2V_fastwam
 RESULTS=/mnt/afs_1/charles/codes/LIBERO-plus/eval_results/fastwam_1step_30k
-RUN_SCRIPT="$ROOT/lightx2v_train/scripts/run_fastwam_libero_plus_shared_eval_30k.sh"
+REPORT_ROOT=${REPORT_ROOT:-$ROOT}
+RUN_SCRIPT="$REPORT_ROOT/lightx2v_train/scripts/run_fastwam_libero_plus_shared_eval_30k.sh"
 RUN_SESSION=fastwam_libero_plus_shared_official
 LAUNCH_LOG="$RESULTS/shared_official_launcher.log"
 WATCHDOG_LOG="$RESULTS/shared_watchdog.log"
@@ -11,14 +12,13 @@ PYTHON=${PYTHON:-/mnt/afs_1/charles/env/miniconda3/envs/lightx2v_libero_plus/bin
 PROTOCOL_DIRECTORY=${PROTOCOL_DIRECTORY:-official_protocol_shared_policy}
 LORA_SUMMARY="$RESULTS/lora_only_30k/$PROTOCOL_DIRECTORY/summary.json"
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-$ROOT}
-REPORT_ROOT=${REPORT_ROOT:-$ROOT}
 JOINT_ADAPTER="$ARTIFACT_ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_joint/exports/checkpoint-000030000-student.pt"
 COMPARISON_SUMMARY="$RESULTS/comparison_summary.json"
 FINAL_AGGREGATOR="$REPORT_ROOT/lightx2v_train/tools/aggregate_fastwam_libero_shared_results.py"
 FINAL_AGGREGATOR_LOG="$RESULTS/final_aggregation.log"
 SNAPSHOT_AUDIT="$RESULTS/FROZEN_SNAPSHOT_PROTOCOL_AUDIT.json"
 TASK_CATALOG_AUDIT="$RESULTS/TASK_CATALOG_RESOURCE_AUDIT.json"
-PROGRESS_TOOL="$ROOT/lightx2v_train/tools/report_fastwam_libero_shared_progress.py"
+PROGRESS_TOOL="$REPORT_ROOT/lightx2v_train/tools/report_fastwam_libero_shared_progress.py"
 PROGRESS_OUTPUT="$RESULTS/LIVE_PROGRESS.json"
 STALL_TIMEOUT_SECONDS=${STALL_TIMEOUT_SECONDS:-3600}
 PROGRESS_CHECK_SECONDS=${PROGRESS_CHECK_SECONDS:-60}
