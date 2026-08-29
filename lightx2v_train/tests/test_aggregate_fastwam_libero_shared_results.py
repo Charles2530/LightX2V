@@ -48,6 +48,19 @@ def test_rejects_log_with_error_marker(tmp_path):
         aggregate.validate_server_logs(log_manifest(log, command))
 
 
+def test_rejects_checkpoint_changed_after_snapshot(tmp_path):
+    checkpoint = tmp_path / "adapter.pt"
+    checkpoint.write_bytes(b"current")
+    expected = {
+        "path": str(checkpoint),
+        "size_bytes": len(b"frozen!"),
+        "sha256": aggregate.hashlib.sha256(b"frozen!").hexdigest(),
+    }
+
+    with pytest.raises(RuntimeError, match="SHA256 differs"):
+        aggregate.checkpoint_evidence(checkpoint, expected)
+
+
 def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -170,11 +183,44 @@ def make_weight(results_root, label, adapter):
 
 def test_verifies_four_shared_policy_weights(tmp_path, monkeypatch):
     results_root = tmp_path / "results"
+    (results_root / "model").mkdir(parents=True)
+    (results_root / "stats.json").write_text("stats", encoding="utf-8")
+    (results_root / "policy.json").write_text("policy", encoding="utf-8")
     weights = []
-    for label in ("native", "old", "lora_only", "joint"):
+    frozen_weights = []
+    labels = ("native", "old_success_baseline_30k", "lora_only_30k", "joint_30k")
+    for label in labels:
         adapter = tmp_path / f"{label}.pt"
         make_weight(results_root, label, adapter)
         weights.extend(["--weight", label, label, str(adapter)])
+        frozen_weights.append(
+            {
+                "label": label,
+                "path": str(adapter.resolve()),
+                "size_bytes": adapter.stat().st_size,
+                "sha256": aggregate.sha256_file(adapter),
+            }
+        )
+    snapshot_audit = results_root / "FROZEN_SNAPSHOT_PROTOCOL_AUDIT.json"
+    write_json(
+        snapshot_audit,
+        {
+            "status": "active",
+            "evaluation_code_snapshot": {"git_commit": "test"},
+            "dependencies": {
+                "base_model": str((results_root / "model").resolve()),
+                "dataset_stats": {
+                    "path": str((results_root / "stats.json").resolve()),
+                    "sha256": aggregate.sha256_file(results_root / "stats.json"),
+                },
+                "policy_config": {
+                    "path": str((results_root / "policy.json").resolve()),
+                    "sha256": aggregate.sha256_file(results_root / "policy.json"),
+                },
+            },
+            "ordered_weights": frozen_weights,
+        },
+    )
 
     monkeypatch.setattr(
         sys,
@@ -183,25 +229,25 @@ def test_verifies_four_shared_policy_weights(tmp_path, monkeypatch):
             "aggregate_fastwam_libero_shared_results.py",
             "--results-root",
             str(results_root),
+            "--snapshot-audit",
+            str(snapshot_audit),
             *weights,
         ],
     )
     aggregate.main()
 
     comparison = json.loads((results_root / "comparison_summary.json").read_text())
-    assert comparison["verification"]["weights_verified"] == [
-        "native",
-        "old",
-        "lora_only",
-        "joint",
-    ]
+    assert comparison["verification"]["weights_verified"] == list(labels)
     assert comparison["verification"]["total_tasks_per_weight"] == 7
     assert comparison["verification"]["total_episodes_per_weight"] == 350
+    assert comparison["verification"]["checkpoint_and_dependency_hashes_match_snapshot"]
+    assert len(comparison["snapshot_audit"]["sha256"]) == 64
     assert comparison["weights"]["native"]["summary"]["overall"]["success_rate"] == 0.98
-    assert comparison["weights"]["joint"]["wall_clock"]["elapsed_seconds"] == 7.0
+    assert comparison["weights"]["joint_30k"]["wall_clock"]["elapsed_seconds"] == 7.0
     native = comparison["weights"]["native"]
     assert native["checkpoint"]["path"] == str((tmp_path / "native.pt").resolve())
     assert len(native["checkpoint"]["sha256"]) == 64
+    assert native["checkpoint"]["matches_snapshot_audit"]
     assert len(native["server_log_evidence"]) == 7
     assert all(item["commands_match_manifest"] for item in native["server_log_evidence"])
     assert all(item["action_infer_steps"] == 1 for item in native["server_log_evidence"])

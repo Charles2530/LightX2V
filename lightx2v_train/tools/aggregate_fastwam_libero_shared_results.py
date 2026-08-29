@@ -37,6 +37,10 @@ def parse_args():
     )
     parser.add_argument("--output-json")
     parser.add_argument("--output-csv")
+    parser.add_argument(
+        "--snapshot-audit",
+        help="Frozen pre-run audit containing expected checkpoint and dependency SHA256 values",
+    )
     return parser.parse_args()
 
 
@@ -52,15 +56,89 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def checkpoint_evidence(adapter):
+def checkpoint_evidence(adapter, expected=None):
     path = Path(adapter)
     if not path.is_file():
         raise FileNotFoundError(f"Missing adapter checkpoint: {path}")
-    return {
+    evidence = {
         "path": str(path.resolve()),
         "size_bytes": path.stat().st_size,
         "sha256": sha256_file(path),
     }
+    if expected is not None:
+        if common.resolved(expected["path"]) != evidence["path"]:
+            raise RuntimeError(f"Checkpoint path differs from frozen audit: {path}")
+        if int(expected["size_bytes"]) != evidence["size_bytes"]:
+            raise RuntimeError(f"Checkpoint size differs from frozen audit: {path}")
+        if expected["sha256"] != evidence["sha256"]:
+            raise RuntimeError(f"Checkpoint SHA256 differs from frozen audit: {path}")
+        evidence["expected_sha256"] = expected["sha256"]
+        evidence["matches_snapshot_audit"] = True
+    return evidence
+
+
+def load_snapshot_audit(path):
+    if not path:
+        return None
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing frozen snapshot audit: {path}")
+    payload = common.load_json(path)
+    weights = {item["label"]: item for item in payload.get("ordered_weights", [])}
+    dependencies = payload.get("dependencies", {})
+    dataset_stats = dependencies.get("dataset_stats", {})
+    policy_config = dependencies.get("policy_config", {})
+    required_labels = {"native", "old_success_baseline_30k", "lora_only_30k", "joint_30k"}
+    if set(weights) != required_labels:
+        raise RuntimeError(f"Frozen snapshot audit has unexpected weights: {sorted(weights)}")
+
+    verified_dependencies = {}
+    for name, expected in (("dataset_stats", dataset_stats), ("policy_config", policy_config)):
+        dependency_path = Path(expected.get("path", "")).expanduser().resolve()
+        if not dependency_path.is_file():
+            raise FileNotFoundError(f"Missing frozen dependency {name}: {dependency_path}")
+        actual_sha256 = sha256_file(dependency_path)
+        if actual_sha256 != expected.get("sha256"):
+            raise RuntimeError(f"{name} SHA256 differs from frozen audit: {dependency_path}")
+        verified_dependencies[name] = {
+            "path": str(dependency_path),
+            "sha256": actual_sha256,
+            "matches_snapshot_audit": True,
+        }
+
+    base_model = common.resolved(dependencies["base_model"])
+    if not Path(base_model).exists():
+        raise FileNotFoundError(f"Missing frozen base model: {base_model}")
+    return {
+        "weights": weights,
+        "base_model": base_model,
+        "dependencies": verified_dependencies,
+        "output": {
+            "path": str(path),
+            "sha256": sha256_file(path),
+            "status": payload.get("status"),
+            "evaluation_code_snapshot": payload.get("evaluation_code_snapshot"),
+            "dependencies": {"base_model": base_model, **verified_dependencies},
+            "weight_sha256": {label: item["sha256"] for label, item in weights.items()},
+        },
+    }
+
+
+def validate_manifest_against_snapshot(manifest, snapshot):
+    if snapshot is None:
+        return
+    expected = {
+        "model_path": snapshot["base_model"],
+        "dataset_stats": snapshot["dependencies"]["dataset_stats"]["path"],
+        "policy_config": snapshot["dependencies"]["policy_config"]["path"],
+    }
+    mismatches = {
+        key: {"actual": common.resolved(manifest[key]), "expected": value}
+        for key, value in expected.items()
+        if common.resolved(manifest[key]) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"Command manifest differs from frozen dependency paths: {mismatches}")
 
 
 def validate_server_logs(manifest):
@@ -156,7 +234,7 @@ def validate_shards(protocol_root, expected_shards, official, implementation):
     }
 
 
-def validate_weight(label, result_dir, expected_adapter, reference, protocol_directory):
+def validate_weight(label, result_dir, expected_adapter, reference, protocol_directory, snapshot=None):
     protocol_root = result_dir / protocol_directory
     summary_path = protocol_root / "summary.json"
     commands_path = protocol_root / "commands.json"
@@ -165,6 +243,8 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
     result = common.load_json(summary_path)
     manifest = common.load_json(commands_path)
     adapter = common.resolved(expected_adapter)
+    validate_manifest_against_snapshot(manifest, snapshot)
+    expected_checkpoint = snapshot["weights"][label] if snapshot is not None else None
 
     if result.get("adapter") != adapter or manifest.get("adapter") != adapter:
         raise RuntimeError(f"{label} did not use expected adapter {adapter}")
@@ -269,7 +349,7 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
         "output": {
             "label": label,
             "adapter": adapter,
-            "checkpoint": checkpoint_evidence(adapter),
+            "checkpoint": checkpoint_evidence(adapter, expected_checkpoint),
             "summary_json": str(summary_path.resolve()),
             "commands_json": str(commands_path.resolve()),
             "launcher_command": manifest.get("launcher_command"),
@@ -299,6 +379,7 @@ def main():
     results_root = Path(args.results_root).expanduser().resolve()
     output_json = Path(args.output_json).expanduser().resolve() if args.output_json else results_root / "comparison_summary.json"
     output_csv = Path(args.output_csv).expanduser().resolve() if args.output_csv else results_root / "comparison_summary.csv"
+    snapshot = load_snapshot_audit(args.snapshot_audit)
     weights = {}
     reference = None
     for label, directory, adapter in args.weight:
@@ -313,6 +394,7 @@ def main():
             adapter,
             reference,
             args.protocol_directory,
+            snapshot,
         )
         if reference is None:
             reference = validated["reference"]
@@ -321,12 +403,14 @@ def main():
     payload = {
         "generated_at": common.utc_now(),
         "results_root": str(results_root),
+        "snapshot_audit": snapshot["output"] if snapshot is not None else None,
         "verification": {
             "weights_verified": list(weights),
             "all_suites_and_tasks_complete": True,
             "same_episode_catalog_seed_and_initial_states": True,
             "official_protocol_and_implementation_match": True,
             "shared_policy_lazy_prompt_cache_verified": True,
+            "checkpoint_and_dependency_hashes_match_snapshot": snapshot is not None,
             "physical_cuda_devices": [1, 2, 3, 4, 5, 6, 7],
             "episodes_per_task": common.EPISODES_PER_TASK,
             "total_tasks_per_weight": sum(reference["task_counts"].values()),
