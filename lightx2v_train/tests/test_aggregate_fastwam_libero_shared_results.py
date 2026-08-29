@@ -2,12 +2,50 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 TOOLS_ROOT = Path(__file__).resolve().parents[1] / "tools"
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
 import aggregate_fastwam_libero_shared_results as aggregate
+
+
+def log_manifest(path, command):
+    return {
+        "commands": [
+            {
+                "physical_cuda_device": 1,
+                "log": str(path),
+                "command": command,
+            }
+        ]
+    }
+
+
+def test_rejects_log_without_one_step_configuration(tmp_path):
+    command = "python eval_fastwam_libero_shared_policy.py --seed 0"
+    log = tmp_path / "server.log"
+    log.write_text(f"[2026-01-01T00:00:00Z] {command}\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="missing"):
+        aggregate.validate_server_logs(log_manifest(log, command))
+
+
+def test_rejects_log_with_error_marker(tmp_path):
+    command = (
+        "python eval_fastwam_libero_shared_policy.py "
+        "--expected-action-infer-steps 1 --expected-actions-per-plan 10 --seed 0"
+    )
+    log = tmp_path / "server.log"
+    log.write_text(
+        f"[2026-01-01T00:00:00Z] {command}\nTraceback (most recent call last):\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="error markers"):
+        aggregate.validate_server_logs(log_manifest(log, command))
 
 
 def write_json(path, payload):
@@ -55,9 +93,29 @@ def make_weight(results_root, label, adapter):
                 }
             )
 
-    commands = [{"command": f"server {device}"} for device in range(1, 8)]
+    adapter.write_bytes(label.encode("utf-8"))
+    commands = []
+    for device in range(1, 8):
+        log = protocol_root / f"server-cuda-{device}.log"
+        command = (
+            "python eval_fastwam_libero_shared_policy.py "
+            "--expected-action-infer-steps 1 --expected-actions-per-plan 10 --seed 0"
+        )
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(f"\n[2026-01-01T00:00:00Z] {command}\n", encoding="utf-8")
+        commands.append(
+            {
+                "physical_cuda_device": device,
+                "log": str(log.resolve()),
+                "command": command,
+            }
+        )
     manifest = {
         "adapter": str(adapter.resolve()),
+        "model_path": str((results_root / "model").resolve()),
+        "dataset_stats": str((results_root / "stats.json").resolve()),
+        "policy_config": str((results_root / "policy.json").resolve()),
+        "libero_root": str((results_root / "libero").resolve()),
         "launcher_command": "synthetic launcher",
         "evaluation_mode": aggregate.EVALUATION_MODE,
         "task_counts": task_counts,
@@ -141,4 +199,14 @@ def test_verifies_four_shared_policy_weights(tmp_path, monkeypatch):
     assert comparison["verification"]["total_episodes_per_weight"] == 350
     assert comparison["weights"]["native"]["summary"]["overall"]["success_rate"] == 0.98
     assert comparison["weights"]["joint"]["wall_clock"]["elapsed_seconds"] == 7.0
+    native = comparison["weights"]["native"]
+    assert native["checkpoint"]["path"] == str((tmp_path / "native.pt").resolve())
+    assert len(native["checkpoint"]["sha256"]) == 64
+    assert len(native["server_log_evidence"]) == 7
+    assert all(item["commands_match_manifest"] for item in native["server_log_evidence"])
+    assert all(item["action_infer_steps"] == 1 for item in native["server_log_evidence"])
+    task = native["summary"]["tasks"]["libero_spatial/0"]
+    assert task["failure_reasons"] == {"max_steps_exceeded": 1}
+    assert task["average_policy_steps"] == 110.0
+    assert task["rollout_elapsed_seconds"] == 50.0
     assert len((results_root / "comparison_summary.csv").read_text().splitlines()) == 49

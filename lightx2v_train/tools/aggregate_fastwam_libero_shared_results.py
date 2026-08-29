@@ -1,6 +1,7 @@
 """Strictly verify and compare four shared-policy LIBERO-plus evaluations."""
 
 import argparse
+import hashlib
 import json
 import sys
 from datetime import datetime
@@ -14,6 +15,13 @@ import aggregate_fastwam_libero_results as common
 
 
 EVALUATION_MODE = "shared-policy-multiprocessing-queues-v1"
+LOG_ERROR_MARKERS = (
+    "Traceback (most recent call last):",
+    "CUDA out of memory",
+    "ConnectionResetError",
+    "BrokenPipeError",
+    "Shared policy inference failed:",
+)
 
 
 def parse_args():
@@ -34,6 +42,82 @@ def parse_args():
 
 def parse_timestamp(value):
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def checkpoint_evidence(adapter):
+    path = Path(adapter)
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing adapter checkpoint: {path}")
+    return {
+        "path": str(path.resolve()),
+        "size_bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
+    }
+
+
+def validate_server_logs(manifest):
+    evidence = []
+    for item in manifest["commands"]:
+        path = Path(item["log"]).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing policy-server log: {path}")
+        expected_command = item["command"]
+        launch_lines = []
+        errors = []
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                digest.update(raw_line)
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if "eval_fastwam_libero_shared_policy.py" in line and line.startswith("["):
+                    _, separator, command = line.partition("] ")
+                    if not separator or command != expected_command:
+                        raise RuntimeError(
+                            f"Policy-server launch in {path}:{line_number} differs from commands.json"
+                        )
+                    required = (
+                        "--expected-action-infer-steps 1",
+                        "--expected-actions-per-plan 10",
+                        "--seed 0",
+                    )
+                    missing = [token for token in required if token not in command]
+                    if missing:
+                        raise RuntimeError(
+                            f"Policy-server log {path}:{line_number} is missing {missing}"
+                        )
+                    launch_lines.append(line_number)
+                if any(marker in line for marker in LOG_ERROR_MARKERS) or (
+                    "Environment worker " in line and " failed:" in line
+                ):
+                    errors.append({"line": line_number, "text": line[:500]})
+        if not launch_lines:
+            raise RuntimeError(f"Policy-server log has no recorded launch command: {path}")
+        if errors:
+            raise RuntimeError(f"Policy-server log contains error markers: {path}: {errors[:3]}")
+        evidence.append(
+            {
+                "physical_cuda_device": int(item["physical_cuda_device"]),
+                "path": str(path),
+                "size_bytes": path.stat().st_size,
+                "sha256": digest.hexdigest(),
+                "launch_count": len(launch_lines),
+                "launch_line_numbers": launch_lines,
+                "commands_match_manifest": True,
+                "action_infer_steps": common.ACTION_INFER_STEPS,
+                "actions_per_plan": 10,
+                "seed": common.SEED,
+                "error_markers": 0,
+            }
+        )
+    return evidence
 
 
 def validate_shards(protocol_root, expected_shards, official, implementation):
@@ -174,6 +258,7 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
         raise RuntimeError(f"{label} episode catalog differs from native")
 
     wall_clock = validate_shards(protocol_root, expected_shards, official, implementation)
+    logs = validate_server_logs(manifest)
     return {
         "reference": {
             "task_counts": task_counts,
@@ -184,10 +269,16 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
         "output": {
             "label": label,
             "adapter": adapter,
+            "checkpoint": checkpoint_evidence(adapter),
             "summary_json": str(summary_path.resolve()),
             "commands_json": str(commands_path.resolve()),
             "launcher_command": manifest.get("launcher_command"),
             "server_commands": [item.get("command") for item in manifest["commands"]],
+            "server_log_evidence": logs,
+            "model_path": common.resolved(manifest["model_path"]),
+            "dataset_stats": common.resolved(manifest["dataset_stats"]),
+            "policy_config": common.resolved(manifest["policy_config"]),
+            "libero_root": common.resolved(manifest["libero_root"]),
             "task_counts": task_counts,
             "episodes_per_task": common.EPISODES_PER_TASK,
             "total_episodes": expected_episodes,
