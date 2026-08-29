@@ -52,6 +52,12 @@ def parse_args():
     parser.add_argument("--libero-root", required=True)
     parser.add_argument("--benchmarks", nargs="+", default=list(DEFAULT_BENCHMARKS))
     parser.add_argument("--devices", nargs="+", type=int, default=list(range(8)))
+    parser.add_argument(
+        "--workers-per-device",
+        type=int,
+        default=1,
+        help="Independent evaluation workers to colocate on each CUDA device",
+    )
     parser.add_argument("--episodes-per-task", type=int, default=50)
     parser.add_argument("--episode-offset", type=int, default=0)
     parser.add_argument("--tasks-per-shard", type=int, default=10)
@@ -248,15 +254,21 @@ def build_eval_command(args, adapter, output_path, shard, device):
 def write_command_manifest(args, adapter, output_root, task_counts, shards):
     official_protocol = load_official_evaluation_protocol(args.libero_root)
     implementation = load_fastwam_evaluation_implementation(ROOT)
+    worker_slots = [
+        (device, worker_index)
+        for worker_index in range(args.workers_per_device)
+        for device in args.devices
+    ]
     commands = []
     for index, shard in enumerate(shards):
-        device = args.devices[index % len(args.devices)]
+        device, worker_index = worker_slots[index % len(worker_slots)]
         visible_devices = str(device) if device == 0 else f"{device},0"
         output = output_root / "shards" / f"{shard.name}.json"
         commands.append(
             {
                 "shard": shard.name,
                 "physical_cuda_device": device,
+                "worker_index": worker_index,
                 "cuda_visible_devices": visible_devices,
                 "mujoco_egl_device_id": "0",
                 "command": shlex.join(build_eval_command(args, adapter, output, shard, device)),
@@ -282,6 +294,7 @@ def write_command_manifest(args, adapter, output_root, task_counts, shards):
         "official_evaluation": official_protocol,
         "fastwam_evaluation_implementation": implementation,
         "devices": args.devices,
+        "workers_per_device": args.workers_per_device,
         "commands": commands,
     }
     atomic_json_dump(manifest, output_root / "commands.json")
@@ -320,12 +333,17 @@ def run_shards(args, adapter, output_root, shards):
     devices = [int(device) for device in args.devices]
     if not devices or len(set(devices)) != len(devices):
         raise ValueError("--devices must contain distinct CUDA device indices")
+    worker_slots = [
+        (device, worker_index)
+        for worker_index in range(args.workers_per_device)
+        for device in devices
+    ]
 
     active = {}
     try:
         while pending or active:
-            free_devices = [device for device in devices if device not in active]
-            for device in free_devices:
+            free_slots = [slot for slot in worker_slots if slot not in active]
+            for device, worker_index in free_slots:
                 if not pending:
                     break
                 shard = pending.pop(0)
@@ -350,21 +368,29 @@ def run_shards(args, adapter, output_root, shards):
                     }
                 )
                 process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=env)
-                active[device] = (process, log, shard, log_path)
-                print(f"[launch] physical_device={device} shard={shard.name} pid={process.pid}", flush=True)
+                active[(device, worker_index)] = (process, log, shard, log_path)
+                print(
+                    f"[launch] physical_device={device} worker={worker_index} "
+                    f"shard={shard.name} pid={process.pid}",
+                    flush=True,
+                )
 
             time.sleep(1)
-            for device, (process, log, shard, log_path) in list(active.items()):
+            for slot, (process, log, shard, log_path) in list(active.items()):
                 return_code = process.poll()
                 if return_code is None:
                     continue
                 log.close()
-                del active[device]
+                del active[slot]
                 if return_code:
                     raise RuntimeError(
                         f"LIBERO evaluation shard {shard.name} failed with code {return_code}; log={log_path}"
                     )
-                print(f"[complete] physical_device={device} shard={shard.name}", flush=True)
+                device, worker_index = slot
+                print(
+                    f"[complete] physical_device={device} worker={worker_index} shard={shard.name}",
+                    flush=True,
+                )
     finally:
         stop_active_processes(active)
 
@@ -478,8 +504,16 @@ def aggregate_results(args, output_root, checkpoint, adapter, iteration, task_co
 
 def main():
     args = parse_args()
-    if args.episodes_per_task <= 0 or args.tasks_per_shard <= 0 or args.episode_offset < 0:
-        raise ValueError("Episode count and shard size must be positive; offset must be non-negative")
+    if (
+        args.episodes_per_task <= 0
+        or args.tasks_per_shard <= 0
+        or args.workers_per_device <= 0
+        or args.episode_offset < 0
+    ):
+        raise ValueError(
+            "Episode count, shard size, and workers per device must be positive; "
+            "offset must be non-negative"
+        )
     if args.max_steps < 0:
         raise ValueError("--max-steps cannot be negative")
     if args.checkpoint and not args.train_config:
