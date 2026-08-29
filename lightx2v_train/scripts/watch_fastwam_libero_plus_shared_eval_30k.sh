@@ -11,8 +11,11 @@ PYTHON=${PYTHON:-/mnt/afs_1/charles/env/miniconda3/envs/lightx2v_libero_plus/bin
 PROTOCOL_DIRECTORY=${PROTOCOL_DIRECTORY:-official_protocol_shared_policy}
 LORA_SUMMARY="$RESULTS/lora_only_30k/$PROTOCOL_DIRECTORY/summary.json"
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-$ROOT}
+REPORT_ROOT=${REPORT_ROOT:-$ROOT}
 JOINT_ADAPTER="$ARTIFACT_ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_joint/exports/checkpoint-000030000-student.pt"
 COMPARISON_SUMMARY="$RESULTS/comparison_summary.json"
+FINAL_AGGREGATOR="$REPORT_ROOT/lightx2v_train/tools/aggregate_fastwam_libero_shared_results.py"
+FINAL_AGGREGATOR_LOG="$RESULTS/final_aggregation.log"
 PROGRESS_TOOL="$ROOT/lightx2v_train/tools/report_fastwam_libero_shared_progress.py"
 PROGRESS_OUTPUT="$RESULTS/LIVE_PROGRESS.json"
 STALL_TIMEOUT_SECONDS=${STALL_TIMEOUT_SECONDS:-3600}
@@ -42,20 +45,67 @@ stop_one_policy_server() {
 
 comparison_complete() {
     [[ -f "$COMPARISON_SUMMARY" ]] || return 1
-    /mnt/afs_1/charles/env/miniconda3/envs/lightx2v_libero_plus/bin/python - "$COMPARISON_SUMMARY" <<'PY' >/dev/null 2>&1
+    "$PYTHON" - "$COMPARISON_SUMMARY" "$PROTOCOL_DIRECTORY" <<'PY' >/dev/null 2>&1
 import json
 import sys
 
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
+protocol_directory = sys.argv[2]
 verification = payload.get("verification", {})
+weights = payload.get("weights", {})
+expected_weights = {"native", "old_success_baseline_30k", "lora_only_30k", "joint_30k"}
+weight_outputs_valid = set(weights) == expected_weights and all(
+    int(item.get("total_episodes", -1)) == 501500
+    and f"/{protocol_directory}/" in item.get("summary_json", "")
+    and f"/{protocol_directory}/" in item.get("commands_json", "")
+    for item in weights.values()
+)
 raise SystemExit(
     0
     if verification.get("all_suites_and_tasks_complete")
     and verification.get("same_episode_catalog_seed_and_initial_states")
     and verification.get("shared_policy_lazy_prompt_cache_verified")
+    and weight_outputs_valid
     else 1
 )
 PY
+}
+
+enhanced_comparison_complete() {
+    [[ -f "$COMPARISON_SUMMARY" ]] || return 1
+    "$PYTHON" - "$COMPARISON_SUMMARY" <<'PY' >/dev/null 2>&1
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+weights = payload.get("weights", {})
+valid = len(weights) == 4
+for item in weights.values():
+    checkpoint = item.get("checkpoint", {})
+    logs = item.get("server_log_evidence", [])
+    valid = valid and len(checkpoint.get("sha256", "")) == 64 and len(logs) == 7
+    valid = valid and all(
+        log.get("commands_match_manifest")
+        and int(log.get("action_infer_steps", -1)) == 1
+        and int(log.get("error_markers", -1)) == 0
+        for log in logs
+    )
+raise SystemExit(0 if valid else 1)
+PY
+}
+
+run_final_aggregator() {
+    "$PYTHON" "$FINAL_AGGREGATOR" \
+        --results-root "$RESULTS" \
+        --protocol-directory "$PROTOCOL_DIRECTORY" \
+        --weight native native /mnt/afs_1/charles/models/fastwam/libero_uncond_2cam224.pt \
+        --weight old_success_baseline_30k old_success_baseline_30k \
+            "$ARTIFACT_ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_16gpu_mbs48_nogc/exports/checkpoint-000030000-student.pt" \
+        --weight lora_only_30k lora_only_30k \
+            "$ARTIFACT_ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_only/exports/checkpoint-000030000-student.pt" \
+        --weight joint_30k joint_30k \
+            "$ARTIFACT_ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_joint/exports/checkpoint-000030000-student.pt" \
+        >> "$FINAL_AGGREGATOR_LOG" 2>&1
 }
 
 last_progress_at=$(date +%s)
@@ -104,4 +154,11 @@ while ! comparison_complete; do
     sleep "$PROGRESS_CHECK_SECONDS"
 done
 
+printf '[%s] base comparison complete; generating auditable final comparison\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WATCHDOG_LOG"
+if ! run_final_aggregator || ! enhanced_comparison_complete; then
+    printf '[%s] auditable final comparison failed; see %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$FINAL_AGGREGATOR_LOG" >> "$WATCHDOG_LOG"
+    exit 1
+fi
 printf '[%s] four-weight comparison complete\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WATCHDOG_LOG"
