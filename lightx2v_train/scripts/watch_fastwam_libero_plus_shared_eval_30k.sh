@@ -89,6 +89,7 @@ valid = (
     valid
     and verification.get("evaluation_and_official_hashes_match_snapshot")
     and verification.get("libero_task_resources_match_baseline")
+    and verification.get("episode_outcomes_match_official_horizon")
 )
 for item in weights.values():
     checkpoint = item.get("checkpoint", {})

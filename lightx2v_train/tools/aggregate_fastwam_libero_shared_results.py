@@ -332,6 +332,21 @@ def validate_server_logs(manifest):
     return evidence
 
 
+def validate_episode_outcome(label, key, episode):
+    initialization_steps = int(episode["initialization_steps"])
+    policy_steps = int(episode["policy_steps"])
+    max_policy_steps = int(episode["max_policy_steps"])
+    if not 1 <= policy_steps <= max_policy_steps:
+        raise RuntimeError(f"{label} episode {key} has policy steps outside the official horizon")
+    if int(episode["total_env_steps"]) != initialization_steps + policy_steps:
+        raise RuntimeError(f"{label} episode {key} has inconsistent total environment steps")
+    if bool(episode["success"]):
+        if episode.get("failure_reason") is not None:
+            raise RuntimeError(f"{label} successful episode {key} records a failure reason")
+    elif policy_steps != max_policy_steps or episode.get("failure_reason") != "max_steps_exceeded":
+        raise RuntimeError(f"{label} failed episode {key} did not exhaust the official horizon")
+
+
 def validate_shards(protocol_root, expected_shards, official, implementation):
     paths = sorted((protocol_root / "shards").glob("*.json"))
     if len(paths) != expected_shards:
@@ -459,6 +474,7 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
             or int(episode["policy_steps"]) != int(episode["steps"])
         ):
             raise RuntimeError(f"{label} episode {key} violates official rollout mechanics")
+        validate_episode_outcome(label, key, episode)
         if reference is None:
             initial_states[key] = state
         elif initial_states.get(key) != state:
@@ -551,6 +567,7 @@ def main():
             "all_suites_and_tasks_complete": True,
             "same_episode_catalog_seed_and_initial_states": True,
             "official_protocol_and_implementation_match": True,
+            "episode_outcomes_match_official_horizon": True,
             "shared_policy_lazy_prompt_cache_verified": True,
             "checkpoint_and_dependency_hashes_match_snapshot": snapshot is not None,
             "evaluation_and_official_hashes_match_snapshot": snapshot is not None,

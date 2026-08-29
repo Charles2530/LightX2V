@@ -75,6 +75,38 @@ def test_directory_content_digest_matches_sha256sum_records(tmp_path):
     assert aggregate.directory_content_digest(resources, root) == (2, expected.hexdigest())
 
 
+@pytest.mark.parametrize(
+    ("episode", "message"),
+    (
+        (
+            {
+                "initialization_steps": 5,
+                "policy_steps": 100,
+                "max_policy_steps": 600,
+                "total_env_steps": 105,
+                "success": False,
+                "failure_reason": "max_steps_exceeded",
+            },
+            "did not exhaust",
+        ),
+        (
+            {
+                "initialization_steps": 5,
+                "policy_steps": 100,
+                "max_policy_steps": 600,
+                "total_env_steps": 104,
+                "success": True,
+                "failure_reason": None,
+            },
+            "inconsistent total",
+        ),
+    ),
+)
+def test_rejects_invalid_episode_outcome(episode, message):
+    with pytest.raises(RuntimeError, match=message):
+        aggregate.validate_episode_outcome("native", ("suite", 0, 0), episode)
+
+
 def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -113,6 +145,7 @@ def make_weight(results_root, label, adapter):
                     "max_policy_steps": 600,
                     "steps": 100 if success else 600,
                     "policy_steps": 100 if success else 600,
+                    "total_env_steps": 105 if success else 605,
                     "success": success,
                     "failure_reason": None if success else "max_steps_exceeded",
                     "elapsed_seconds": 1.0,
@@ -327,6 +360,7 @@ def test_verifies_four_shared_policy_weights(tmp_path, monkeypatch):
     assert comparison["verification"]["checkpoint_and_dependency_hashes_match_snapshot"]
     assert comparison["verification"]["evaluation_and_official_hashes_match_snapshot"]
     assert comparison["verification"]["libero_task_resources_match_baseline"]
+    assert comparison["verification"]["episode_outcomes_match_official_horizon"]
     assert len(comparison["snapshot_audit"]["sha256"]) == 64
     assert len(comparison["task_catalog_audit"]["sha256"]) == 64
     assert comparison["weights"]["native"]["summary"]["overall"]["success_rate"] == 0.98

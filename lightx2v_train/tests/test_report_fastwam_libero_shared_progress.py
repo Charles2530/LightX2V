@@ -163,3 +163,29 @@ def test_detects_duplicate_and_seed_violation(tmp_path):
     assert native["partial_invariant_violations"]["seed"] == 2
     assert native["partial_invariants_valid"] is False
     assert report["all_partial_invariants_valid"] is False
+
+
+def test_detects_failed_episode_before_horizon():
+    violations = progress.Counter()
+    episode = {
+        "episode_index": 0,
+        "num_init_states": 50,
+        "init_state_id": 0,
+        "seed": 0,
+        "initialization_steps": 5,
+        "max_policy_steps": 600,
+        "steps": 100,
+        "policy_steps": 100,
+        "total_env_steps": 105,
+        "success": False,
+        "failure_reason": "max_steps_exceeded",
+    }
+    reference = {
+        "seed": 0,
+        "episodes_per_task": 50,
+        "official_evaluation": {"initialization_steps": 5, "max_policy_steps": 600},
+    }
+
+    progress.audit_episode(episode, reference, violations)
+
+    assert violations == {"failure_not_at_horizon": 1}

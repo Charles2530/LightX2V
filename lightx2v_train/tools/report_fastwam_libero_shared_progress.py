@@ -111,8 +111,18 @@ def audit_episode(episode, reference, violations):
         episode["initialization_steps"]
     ):
         violations["total_env_steps"] += 1
-    if bool(episode["success"]) == bool(episode.get("failure_reason")):
-        violations["failure_reason"] += 1
+    policy_steps = int(episode["policy_steps"])
+    max_policy_steps = int(episode["max_policy_steps"])
+    if not 1 <= policy_steps <= max_policy_steps:
+        violations["policy_step_horizon"] += 1
+    if bool(episode["success"]):
+        if episode.get("failure_reason") is not None:
+            violations["success_failure_reason"] += 1
+    else:
+        if episode.get("failure_reason") != "max_steps_exceeded":
+            violations["failure_reason"] += 1
+        if policy_steps != max_policy_steps:
+            violations["failure_not_at_horizon"] += 1
 
 
 def audit_protocol(payload, manifest, reference, violations):
