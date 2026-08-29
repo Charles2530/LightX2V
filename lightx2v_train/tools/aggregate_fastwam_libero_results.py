@@ -117,7 +117,7 @@ def parse_timestamp(value):
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
 
 
-def shard_wall_time(protocol_root, expected_shards):
+def shard_wall_time(protocol_root, expected_shards, require_released_text_encoder):
     shards = sorted((protocol_root / "shards").glob("*.json"))
     if len(shards) != expected_shards:
         raise RuntimeError(
@@ -129,6 +129,12 @@ def shard_wall_time(protocol_root, expected_shards):
         payload = load_json(path)
         if not payload.get("finished_at"):
             raise RuntimeError(f"Incomplete result shard: {path}")
+        protocol = payload.get("protocol", {})
+        if require_released_text_encoder and (
+            protocol.get("text_encoder_released") is not True
+            or int(protocol.get("prompt_cache_size", 0)) <= 0
+        ):
+            raise RuntimeError(f"Result shard did not release T5 after caching prompts: {path}")
         starts.append(parse_timestamp(payload["started_at"]))
         finishes.append(parse_timestamp(payload["finished_at"]))
     started = min(starts)
@@ -176,6 +182,8 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
         raise RuntimeError(f"{label} command manifest has the wrong seed or inference steps")
     if manifest.get("devices") != [1, 2, 3, 4, 5, 6, 7]:
         raise RuntimeError(f"{label} command manifest did not use CUDA devices 1-7")
+    if manifest.get("release_text_encoder_after_prompt_cache") is not True:
+        raise RuntimeError(f"{label} command manifest did not enable prompt caching and T5 release")
 
     official = result.get("official_evaluation")
     if official != manifest.get("official_evaluation"):
@@ -241,7 +249,11 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
         raise RuntimeError(f"{label} episode catalog differs from native")
 
     recomputed = summarize(episodes)
-    wall_time = shard_wall_time(protocol_root, len(commands))
+    wall_time = shard_wall_time(
+        protocol_root,
+        len(commands),
+        require_released_text_encoder=True,
+    )
     return {
         "reference": {
             "task_counts": task_counts,
@@ -260,6 +272,7 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
             "total_episodes": expected_episodes,
             "seed": SEED,
             "action_infer_steps": ACTION_INFER_STEPS,
+            "text_encoder_released_after_prompt_cache": True,
             "official_evaluation": official,
             "wall_clock": wall_time,
             "summary": recomputed,
@@ -342,6 +355,7 @@ def main():
             "all_suites_and_tasks_complete": True,
             "same_episode_catalog_seed_and_initial_states": True,
             "official_protocol_and_implementation_match": True,
+            "all_shards_cached_prompts_and_released_text_encoder": True,
             "episodes_per_task": EPISODES_PER_TASK,
             "total_tasks_per_weight": sum(reference["task_counts"].values()),
             "total_episodes_per_weight": sum(reference["task_counts"].values()) * EPISODES_PER_TASK,

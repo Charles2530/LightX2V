@@ -57,6 +57,7 @@ def make_weight(results_root, label, adapter):
         "episodes_per_task": 50,
         "seed": 0,
         "expected_action_infer_steps": 1,
+        "release_text_encoder_after_prompt_cache": True,
         "devices": [1, 2, 3, 4, 5, 6, 7],
         "official_evaluation": official,
         "fastwam_evaluation_implementation": implementation,
@@ -83,6 +84,10 @@ def make_weight(results_root, label, adapter):
             {
                 "started_at": "2026-01-01T00:00:00Z",
                 "finished_at": f"2026-01-01T00:00:{index + 1:02d}Z",
+                "protocol": {
+                    "prompt_cache_size": 1,
+                    "text_encoder_released": True,
+                },
             },
         )
 
