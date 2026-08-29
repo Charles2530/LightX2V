@@ -12,6 +12,29 @@ LORA_SUMMARY="$RESULTS/lora_only_30k/$PROTOCOL_DIRECTORY/summary.json"
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-$ROOT}
 JOINT_ADAPTER="$ARTIFACT_ROOT/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_joint/exports/checkpoint-000030000-student.pt"
 COMPARISON_SUMMARY="$RESULTS/comparison_summary.json"
+STALL_TIMEOUT_SECONDS=${STALL_TIMEOUT_SECONDS:-3600}
+PROGRESS_CHECK_SECONDS=${PROGRESS_CHECK_SECONDS:-60}
+
+latest_progress_epoch() {
+    local latest
+    latest=$(find "$RESULTS" -type f \
+        -path "*/$PROTOCOL_DIRECTORY/shards/*.json" \
+        -printf '%T@\n' 2>/dev/null | sort -nr | head -n 1)
+    if [[ -n "$latest" ]]; then
+        printf '%s\n' "${latest%%.*}"
+    else
+        printf '0\n'
+    fi
+}
+
+stop_one_policy_server() {
+    local pid pgid
+    pid=$(pgrep -f "[e]val_fastwam_libero_shared_policy.py.*$PROTOCOL_DIRECTORY" | head -n 1)
+    [[ -n "$pid" ]] || return 1
+    pgid=$(ps -o pgid= -p "$pid" | tr -d ' ')
+    [[ -n "$pgid" ]] || return 1
+    kill -TERM -- "-$pgid"
+}
 
 comparison_complete() {
     [[ -f "$COMPARISON_SUMMARY" ]] || return 1
@@ -31,9 +54,24 @@ raise SystemExit(
 PY
 }
 
+last_progress_at=$(date +%s)
+
 while ! comparison_complete; do
     if tmux has-session -t "$RUN_SESSION" 2>/dev/null; then
-        sleep 60
+        now=$(date +%s)
+        latest=$(latest_progress_epoch)
+        if (( latest > last_progress_at )); then
+            last_progress_at=$latest
+        elif (( now - last_progress_at >= STALL_TIMEOUT_SECONDS )); then
+            printf '[%s] no shard progress for %ss; restarting %s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$STALL_TIMEOUT_SECONDS" "$RUN_SESSION" \
+                >> "$WATCHDOG_LOG"
+            if ! stop_one_policy_server; then
+                tmux kill-session -t "$RUN_SESSION" 2>/dev/null || true
+            fi
+            last_progress_at=$now
+        fi
+        sleep "$PROGRESS_CHECK_SECONDS"
         continue
     fi
 
@@ -46,7 +84,8 @@ while ! comparison_complete; do
     tmux new-session -d -s "$RUN_SESSION" \
         "/bin/bash -lc 'exec $RUN_SCRIPT >> $LAUNCH_LOG 2>&1'" \
         || true
-    sleep 60
+    last_progress_at=$(date +%s)
+    sleep "$PROGRESS_CHECK_SECONDS"
 done
 
 printf '[%s] four-weight comparison complete\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WATCHDOG_LOG"
