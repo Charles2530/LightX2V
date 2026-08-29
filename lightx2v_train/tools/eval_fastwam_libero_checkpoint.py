@@ -15,16 +15,18 @@ from pathlib import Path
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
+TOOLS_ROOT = Path(__file__).resolve().parent
 TRAIN_ROOT = ROOT / "lightx2v_train"
 SIMULATOR_SRC = ROOT / "lightx2v_ros" / "src" / "simulator"
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
+from libero_eval_protocol import (
+    load_fastwam_evaluation_implementation,
+    load_official_evaluation_protocol,
+)
+
 DEFAULT_BENCHMARKS = ("libero_spatial", "libero_object", "libero_goal", "libero_10")
-OFFICIAL_HORIZONS = {
-    "libero_spatial": 400,
-    "libero_object": 400,
-    "libero_goal": 400,
-    "libero_10": 700,
-    "libero_90": 700,
-}
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,8 @@ def validate_checkpoint(checkpoint):
 
 
 def expected_shard_signature(args, adapter, shard):
+    official_protocol = load_official_evaluation_protocol(args.libero_root)
+    implementation = load_fastwam_evaluation_implementation(ROOT)
     return {
         "adapter": str(adapter),
         "config": resolved(args.policy_config),
@@ -139,6 +143,8 @@ def expected_shard_signature(args, adapter, shard):
         "render_size": args.render_size,
         "seed": args.seed,
         "expected_action_infer_steps": args.expected_action_infer_steps,
+        "official_evaluation": official_protocol,
+        "fastwam_evaluation_implementation": implementation,
     }
 
 
@@ -240,6 +246,8 @@ def build_eval_command(args, adapter, output_path, shard, device):
 
 
 def write_command_manifest(args, adapter, output_root, task_counts, shards):
+    official_protocol = load_official_evaluation_protocol(args.libero_root)
+    implementation = load_fastwam_evaluation_implementation(ROOT)
     commands = []
     for index, shard in enumerate(shards):
         device = args.devices[index % len(args.devices)]
@@ -271,6 +279,8 @@ def write_command_manifest(args, adapter, output_root, task_counts, shards):
         "render_size": args.render_size,
         "seed": args.seed,
         "expected_action_infer_steps": args.expected_action_infer_steps,
+        "official_evaluation": official_protocol,
+        "fastwam_evaluation_implementation": implementation,
         "devices": args.devices,
         "commands": commands,
     }
@@ -437,13 +447,21 @@ def aggregate_results(args, output_root, checkpoint, adapter, iteration, task_co
         raise RuntimeError("Not every shard confirmed the requested action_infer_steps")
     if any(int(item["seed"]) != args.seed for item in protocols):
         raise RuntimeError("Not every shard confirmed the requested seed")
+    official_protocol = load_official_evaluation_protocol(args.libero_root)
+    implementation = load_fastwam_evaluation_implementation(ROOT)
+    if any(item.get("official_evaluation") != official_protocol for item in protocols):
+        raise RuntimeError("Not every shard used the current LIBERO-plus official evaluation protocol")
+    if any(item.get("fastwam_evaluation_implementation") != implementation for item in protocols):
+        raise RuntimeError("Not every shard used the current FastWAM evaluation implementation")
 
     result = {
         "checkpoint": str(checkpoint) if checkpoint else None,
         "adapter": str(adapter),
         "checkpoint_iteration": iteration,
         "evaluation_protocol": f"{args.episodes_per_task}_episodes_per_task",
-        "official_horizons": OFFICIAL_HORIZONS,
+        "official_evaluation": official_protocol,
+        "fastwam_evaluation_implementation": implementation,
+        "max_policy_steps": args.max_steps or official_protocol["max_policy_steps"],
         "task_counts": task_counts,
         "seed": args.seed,
         "action_infer_steps": args.expected_action_infer_steps,

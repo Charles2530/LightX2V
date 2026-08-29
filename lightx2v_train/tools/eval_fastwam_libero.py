@@ -17,7 +17,10 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 ROOT = Path(__file__).resolve().parents[2]
+TOOLS_ROOT = Path(__file__).resolve().parent
 SIMULATOR_SRC = ROOT / "lightx2v_ros" / "src" / "simulator"
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if str(SIMULATOR_SRC) not in sys.path:
@@ -33,15 +36,12 @@ from simulator.libero_node.observer import (
 
 from lightx2v.models.runners.wan.fastwam_runner import FastWAMPolicy
 from lightx2v.utils.set_config import auto_calc_config, get_default_config
+from libero_eval_protocol import (
+    load_fastwam_evaluation_implementation,
+    load_official_evaluation_protocol,
+)
 
 DEFAULT_BENCHMARKS = ("libero_spatial", "libero_object", "libero_goal", "libero_10")
-TASK_MAX_STEPS = {
-    "libero_spatial": 400,
-    "libero_object": 400,
-    "libero_goal": 400,
-    "libero_10": 700,
-    "libero_90": 700,
-}
 
 
 def parse_args():
@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument("--task-ids", nargs="+", type=int)
     parser.add_argument("--episodes-per-task", type=int, default=50)
     parser.add_argument("--episode-offset", type=int, default=0)
-    parser.add_argument("--max-steps", type=int, default=0, help="Override rollout horizon, excluding wait steps")
+    parser.add_argument("--max-steps", type=int, default=0, help="Override the official policy-step horizon")
     parser.add_argument("--render-size", type=int, default=256, help="LIBERO camera render size before policy resize")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=0)
@@ -212,25 +212,24 @@ def summarize(episodes):
     }
 
 
-def run_episode(observer, policy, *, wait_steps, max_steps):
+def run_episode(observer, policy, *, initialization_steps, max_steps):
     policy.reset()
     obs = observer.reset()
     dummy_action = np.zeros(7, dtype=np.float32)
-    dummy_action[-1] = -1.0
     started = time.monotonic()
-    for step in range(wait_steps + max_steps):
-        if step < wait_steps:
-            action = dummy_action
-        else:
-            images, state = policy_observation(obs)
-            action = policy.next_action(images, state, observer.task_description)
+    # Match libero/lifelong/metric.py: settle physics with five all-zero actions.
+    for _ in range(initialization_steps):
+        obs, _, _, _ = observer.step(dummy_action)
+    for policy_step in range(max_steps):
+        images, state = policy_observation(obs)
+        action = policy.next_action(images, state, observer.task_description)
         obs, _, success, _ = observer.step(action)
         if success:
-            return True, step + 1, time.monotonic() - started
-    return False, wait_steps + max_steps, time.monotonic() - started
+            return True, policy_step + 1, time.monotonic() - started
+    return False, max_steps, time.monotonic() - started
 
 
-def build_run_signature(args, task_ids_by_benchmark):
+def build_run_signature(args, task_ids_by_benchmark, official_protocol, implementation):
     return {
         "adapter": resolved(args.adapter),
         "config": resolved(args.config),
@@ -245,6 +244,8 @@ def build_run_signature(args, task_ids_by_benchmark):
         "render_size": args.render_size,
         "seed": args.seed,
         "expected_action_infer_steps": args.expected_action_infer_steps,
+        "official_evaluation": official_protocol,
+        "fastwam_evaluation_implementation": implementation,
     }
 
 
@@ -288,6 +289,8 @@ def main():
     if args.max_steps < 0:
         raise ValueError("--max-steps cannot be negative")
 
+    official_protocol = load_official_evaluation_protocol(args.libero_root)
+    implementation = load_fastwam_evaluation_implementation(ROOT)
     task_counts = discover_task_counts(args.libero_root, args.benchmarks)
     task_ids_by_benchmark = {}
     for benchmark in args.benchmarks:
@@ -301,7 +304,7 @@ def main():
     np.random.seed(args.seed)
     metadata, classification_path = load_task_metadata(args.libero_root)
     policy, policy_config = build_policy(args)
-    wait_steps = int(policy_config.get("num_steps_wait", 30))
+    configured_wait_steps = int(policy_config.get("num_steps_wait", 0))
     action_infer_steps = int(policy.action_infer_steps)
     if action_infer_steps != args.expected_action_infer_steps:
         policy.close()
@@ -327,14 +330,16 @@ def main():
         "action_infer_steps": action_infer_steps,
         "actions_per_plan": int(policy.actions_per_plan),
         "action_chunk_size": int(policy.action_chunk_size),
-        "wait_steps": wait_steps,
+        "configured_num_steps_wait_ignored": configured_wait_steps,
+        "official_evaluation": official_protocol,
+        "fastwam_evaluation_implementation": implementation,
+        "max_policy_steps": args.max_steps or official_protocol["max_policy_steps"],
         "render_size": args.render_size,
-        "initial_state_rule": "episode_index modulo official benchmark task initial-state count",
         "task_counts": task_counts,
     }
     print(f"[protocol] {json.dumps(protocol, ensure_ascii=False, sort_keys=True)}", flush=True)
 
-    run_signature = build_run_signature(args, task_ids_by_benchmark)
+    run_signature = build_run_signature(args, task_ids_by_benchmark, official_protocol, implementation)
     results = load_or_create_results(args.output, run_signature, protocol)
     completed = {
         (item["benchmark"], int(item["task_id"]), int(item["episode_index"])) for item in results["episodes"]
@@ -344,7 +349,7 @@ def main():
 
     try:
         for benchmark in args.benchmarks:
-            horizon = args.max_steps or TASK_MAX_STEPS[benchmark]
+            horizon = args.max_steps or official_protocol["max_policy_steps"]
             for task_id in task_ids_by_benchmark[benchmark]:
                 pending_episode_ids = [
                     episode_index
@@ -375,7 +380,7 @@ def main():
                         success, steps, elapsed = run_episode(
                             observer,
                             policy,
-                            wait_steps=wait_steps,
+                            initialization_steps=official_protocol["initialization_steps"],
                             max_steps=horizon,
                         )
                         record = {
@@ -393,8 +398,9 @@ def main():
                             "success": bool(success),
                             "failure_reason": None if success else "max_steps_exceeded",
                             "steps": steps,
-                            "wait_steps": wait_steps,
-                            "policy_steps": max(0, steps - wait_steps),
+                            "policy_steps": steps,
+                            "initialization_steps": official_protocol["initialization_steps"],
+                            "total_env_steps": official_protocol["initialization_steps"] + steps,
                             "max_policy_steps": horizon,
                             "elapsed_seconds": round(elapsed, 3),
                         }

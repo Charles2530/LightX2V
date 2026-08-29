@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 from contextlib import redirect_stdout
@@ -26,11 +27,13 @@ def add_python_path(path):
 
 
 def setup_libero_config(libero_root):
+    libero_root = Path(libero_root).expanduser().resolve()
     benchmark_root = libero_root / "libero" / "libero"
     if not (benchmark_root / "bddl_files").exists():
         raise FileNotFoundError(f"LIBERO submodule is incomplete: {libero_root}")
 
-    config_dir = Path.home() / ".cache" / "lightx2v_ros" / "libero_config"
+    root_digest = hashlib.sha256(os.fsencode(str(libero_root))).hexdigest()[:16]
+    config_dir = Path.home() / ".cache" / "lightx2v_ros" / "libero_config" / root_digest
     config_file = config_dir / "config.yaml"
     config_dir.mkdir(parents=True, exist_ok=True)
     contents = "\n".join(
@@ -97,7 +100,23 @@ def load_task_init_states(task_suite, task_id):
     # LIBERO-plus predates the PyTorch 2.6 weights_only default change.
     torch.load = load_trusted_init_states
     try:
-        init_states = task_suite.get_task_init_states(int(task_id))
+        try:
+            init_states = task_suite.get_task_init_states(int(task_id))
+        except UnboundLocalError as exc:
+            # Some LIBERO-plus releases omit the fallback branch for ordinary
+            # LIBERO-90 task filenames.  Their direct file layout is still
+            # valid, so recover through the canonical LIBERO path API.
+            if "init_states_path" not in str(exc):
+                raise
+            from libero.libero import get_libero_path
+
+            task = task_suite.get_task(int(task_id))
+            init_states_path = (
+                Path(get_libero_path("init_states"))
+                / task.problem_folder
+                / task.init_states_file
+            )
+            init_states = torch.load(init_states_path, map_location="cpu", weights_only=False)
     finally:
         torch.load = torch_load
     if hasattr(init_states, "detach"):

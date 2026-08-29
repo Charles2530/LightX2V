@@ -16,7 +16,7 @@ evaluate_adapter() {
     local adapter=$2
     "$PYTHON" "$EVALUATOR" \
         --adapter "$adapter" \
-        --output-root "$OUTPUT_ROOT/$label" \
+        --output-root "$OUTPUT_ROOT/$label/official_protocol" \
         --model-path "$MODEL_PATH" \
         --policy-config "$POLICY_CONFIG" \
         --dataset-stats "$DATASET_STATS" \
