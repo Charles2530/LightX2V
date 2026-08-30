@@ -202,6 +202,7 @@ def test_nvidia_egl_server_environment_uses_physical_device(tmp_path, monkeypatc
         expected_actions_per_plan=10,
         env_workers_per_device=1,
         env_workers_by_device={7: 1},
+        egl_devices_by_device={7: 6},
         prompt_cache_limit=1,
         task_ids=[0],
         max_steps=0,
@@ -211,8 +212,8 @@ def test_nvidia_egl_server_environment_uses_physical_device(tmp_path, monkeypatc
     command, visible_devices, egl_device_id = shared_checkpoint.server_command(
         command_args, 7, 0, tmp_path / "output", tmp_path / "ready.json"
     )
-    assert visible_devices == "7"
-    assert egl_device_id == "7"
+    assert visible_devices == "7,6"
+    assert egl_device_id == "6"
     assert command[command.index("--env-workers") + 1] == "1"
 
 
@@ -223,3 +224,27 @@ def test_per_device_environment_worker_overrides():
         overrides=["5=1"],
     )
     assert workers == {1: 12, 2: 12, 5: 1}
+
+
+def test_per_device_egl_overrides():
+    egl_devices = shared_checkpoint.resolve_egl_devices_by_device(
+        devices=[1, 4, 5],
+        overrides=["5=4"],
+    )
+    assert egl_devices == {1: 1, 4: 4, 5: 4}
+
+
+def test_failed_server_is_detected_during_group_startup():
+    class Process:
+        def poll(self):
+            return -6
+
+    active = [
+        {
+            "physical_cuda_device": 5,
+            "process": Process(),
+            "log": "/tmp/server-cuda-5.log",
+        }
+    ]
+    with np.testing.assert_raises_regex(RuntimeError, "CUDA 5 failed with code -6"):
+        shared_checkpoint.raise_for_failed_servers(active)

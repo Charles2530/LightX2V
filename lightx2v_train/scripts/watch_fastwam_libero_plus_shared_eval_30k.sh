@@ -47,6 +47,9 @@ fi
 if [[ -n "${ENV_WORKERS_PER_DEVICE_OVERRIDES:-}" ]]; then
     tmux set-environment -g ENV_WORKERS_PER_DEVICE_OVERRIDES "$ENV_WORKERS_PER_DEVICE_OVERRIDES"
 fi
+if [[ -n "${EGL_DEVICE_OVERRIDES:-}" ]]; then
+    tmux set-environment -g EGL_DEVICE_OVERRIDES "$EGL_DEVICE_OVERRIDES"
+fi
 
 latest_progress_epoch() {
     local latest

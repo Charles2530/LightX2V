@@ -39,6 +39,13 @@ def parse_args():
         metavar="DEVICE=COUNT",
         help="Override environment worker count for one physical CUDA device; repeat as needed",
     )
+    parser.add_argument(
+        "--egl-device-override",
+        action="append",
+        default=[],
+        metavar="CUDA_DEVICE=EGL_DEVICE",
+        help="Override the physical EGL render device for one policy CUDA device; repeat as needed",
+    )
     parser.add_argument("--episodes-per-task", type=int, default=50)
     parser.add_argument("--episode-offset", type=int, default=0)
     parser.add_argument("--tasks-per-shard", type=int, default=1)
@@ -99,7 +106,7 @@ def resolve_nvidia_egl_runtime(path):
         "name": "nvidia-egl",
         "root": str(root),
         "library_dir": str(library_dir),
-        "physical_device_rule": "MUJOCO_EGL_DEVICE_ID equals physical CUDA device index",
+        "physical_device_rule": "MUJOCO_EGL_DEVICE_ID is recorded per policy CUDA device",
         "files": {name: shared_eval.file_record(candidate) for name, candidate in required.items()},
     }
 
@@ -137,6 +144,37 @@ def env_workers_for_device(args, device_index):
     )
 
 
+def resolve_egl_devices_by_device(devices, overrides):
+    egl_devices = {int(device): int(device) for device in devices}
+    seen = set()
+    for value in overrides:
+        device_text, separator, egl_device_text = value.partition("=")
+        if not separator:
+            raise ValueError(
+                f"Invalid --egl-device-override {value!r}; expected CUDA_DEVICE=EGL_DEVICE"
+            )
+        try:
+            device = int(device_text)
+            egl_device = int(egl_device_text)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --egl-device-override {value!r}; expected integer CUDA_DEVICE=EGL_DEVICE"
+            ) from exc
+        if device not in egl_devices:
+            raise ValueError(f"EGL override device {device} is not present in --devices")
+        if device in seen:
+            raise ValueError(f"Duplicate EGL override for CUDA device {device}")
+        if egl_device < 0:
+            raise ValueError(f"EGL override for CUDA device {device} cannot be negative")
+        egl_devices[device] = egl_device
+        seen.add(device)
+    return egl_devices
+
+
+def egl_device_for_device(args, device_index):
+    return getattr(args, "egl_devices_by_device", {}).get(int(device_index), int(device_index))
+
+
 def validate_args(args):
     if not Path(args.adapter).expanduser().is_file():
         raise FileNotFoundError(args.adapter)
@@ -160,7 +198,13 @@ def validate_args(args):
         args.env_workers_per_device,
         args.env_workers_per_device_override,
     )
+    args.egl_devices_by_device = resolve_egl_devices_by_device(
+        args.devices,
+        args.egl_device_override,
+    )
     args.nvidia_egl_runtime = resolve_nvidia_egl_runtime(args.nvidia_egl_root)
+    if args.egl_device_override and args.nvidia_egl_runtime is None:
+        raise ValueError("--egl-device-override requires --nvidia-egl-root")
 
 
 def server_command(args, device_index, assignment_index, output_root, ready_path):
@@ -213,7 +257,11 @@ def server_command(args, device_index, assignment_index, output_root, ready_path
     if args.max_steps:
         command.extend(["--max-steps", str(args.max_steps)])
     if args.nvidia_egl_runtime is not None:
-        return command, str(device_index), str(device_index)
+        egl_device = str(egl_device_for_device(args, device_index))
+        visible_devices = str(device_index)
+        if egl_device != visible_devices:
+            visible_devices = f"{visible_devices},{egl_device}"
+        return command, visible_devices, egl_device
     visible_devices = str(device_index) if device_index == 0 else f"{device_index},0"
     return command, visible_devices, "0"
 
@@ -246,6 +294,9 @@ def build_manifest(args, output_root, selected_tasks, shards, commands, official
         "env_workers_per_device": args.env_workers_per_device,
         "env_workers_by_device": {
             str(device): env_workers_for_device(args, device) for device in args.devices
+        },
+        "egl_devices_by_device": {
+            str(device): egl_device_for_device(args, device) for device in args.devices
         },
         "render_backend": args.nvidia_egl_runtime or {"name": "system-egl"},
         "official_evaluation": official,
@@ -312,6 +363,16 @@ def server_environment(args, item):
     return env
 
 
+def raise_for_failed_servers(active):
+    for item in active:
+        return_code = item["process"].poll()
+        if return_code:
+            raise RuntimeError(
+                f"Shared policy server on CUDA {item['physical_cuda_device']} failed with "
+                f"code {return_code}; log={item['log']}"
+            )
+
+
 def launch_servers(args, output_root, command_items):
     ready_dir = output_root / ".server_ready"
     ready_dir.mkdir(parents=True, exist_ok=True)
@@ -340,13 +401,8 @@ def launch_servers(args, output_root, command_items):
             )
             deadline = time.monotonic() + args.startup_timeout
             while not ready_path.is_file():
-                return_code = process.poll()
-                if return_code is not None:
-                    if return_code:
-                        raise RuntimeError(
-                            f"Shared policy server on CUDA {item['physical_cuda_device']} failed with "
-                            f"code {return_code}; log={item['log']}"
-                        )
+                raise_for_failed_servers(active)
+                if process.poll() is not None:
                     break
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
@@ -356,7 +412,9 @@ def launch_servers(args, output_root, command_items):
                 time.sleep(1)
             if ready_path.is_file():
                 print(f"[ready] physical_device={item['physical_cuda_device']}", flush=True)
+            raise_for_failed_servers(active)
 
+        raise_for_failed_servers(active)
         unfinished = {item["process"].pid: item for item in active if item["process"].poll() is None}
         while unfinished:
             time.sleep(2)

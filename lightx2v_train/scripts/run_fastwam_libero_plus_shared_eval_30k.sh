@@ -22,13 +22,21 @@ LIBERO_ROOT=/mnt/afs_1/charles/codes/LIBERO-plus
 NVIDIA_EGL_ROOT=${NVIDIA_EGL_ROOT:-/mnt/afs_1/charles/env/nvidia-egl-550.90.07/root}
 ENV_WORKERS_PER_DEVICE=${ENV_WORKERS_PER_DEVICE:-12}
 ENV_WORKERS_PER_DEVICE_OVERRIDES=${ENV_WORKERS_PER_DEVICE_OVERRIDES:-}
+EGL_DEVICE_OVERRIDES=${EGL_DEVICE_OVERRIDES:-}
 PROTOCOL_DIRECTORY=${PROTOCOL_DIRECTORY:-official_protocol_shared_policy}
 SCRIPT_ARGS=("$@")
 WORKER_OVERRIDE_ARGS=()
+EGL_OVERRIDE_ARGS=()
 if [[ -n "$ENV_WORKERS_PER_DEVICE_OVERRIDES" ]]; then
     read -r -a worker_overrides <<< "$ENV_WORKERS_PER_DEVICE_OVERRIDES"
     for worker_override in "${worker_overrides[@]}"; do
         WORKER_OVERRIDE_ARGS+=(--env-workers-per-device-override "$worker_override")
+    done
+fi
+if [[ -n "$EGL_DEVICE_OVERRIDES" ]]; then
+    read -r -a egl_device_overrides <<< "$EGL_DEVICE_OVERRIDES"
+    for egl_device_override in "${egl_device_overrides[@]}"; do
+        EGL_OVERRIDE_ARGS+=(--egl-device-override "$egl_device_override")
     done
 fi
 export FASTWAM_EVALUATION_ROOT=${FASTWAM_EVALUATION_ROOT:-$EVAL_ROOT}
@@ -46,6 +54,7 @@ evaluate_adapter() {
         --devices 1 2 3 4 5 6 7 \
         --env-workers-per-device "$ENV_WORKERS_PER_DEVICE" \
         "${WORKER_OVERRIDE_ARGS[@]}" \
+        "${EGL_OVERRIDE_ARGS[@]}" \
         --episodes-per-task 50 \
         --tasks-per-shard 1 \
         --seed 0 \
