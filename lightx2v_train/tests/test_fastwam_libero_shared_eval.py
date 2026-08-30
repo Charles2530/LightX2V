@@ -234,6 +234,32 @@ def test_per_device_egl_overrides():
     assert egl_devices == {1: 1, 4: 4, 5: 4}
 
 
+def test_shared_checkpoint_accepts_positive_action_infer_steps(tmp_path):
+    adapter = tmp_path / "adapter.pt"
+    adapter.write_bytes(b"checkpoint")
+    args = SimpleNamespace(
+        adapter=str(adapter),
+        devices=[1],
+        env_workers_per_device=1,
+        env_workers_per_device_override=[],
+        egl_device_override=[],
+        episodes_per_task=50,
+        episode_offset=0,
+        tasks_per_shard=1,
+        prompt_cache_limit=1,
+        startup_timeout=1,
+        max_steps=0,
+        expected_action_infer_steps=20,
+        nvidia_egl_root=None,
+    )
+
+    shared_checkpoint.validate_args(args)
+
+    args.expected_action_infer_steps = 0
+    with np.testing.assert_raises_regex(ValueError, "must be positive"):
+        shared_checkpoint.validate_args(args)
+
+
 def test_failed_server_is_detected_during_group_startup():
     class Process:
         def poll(self):

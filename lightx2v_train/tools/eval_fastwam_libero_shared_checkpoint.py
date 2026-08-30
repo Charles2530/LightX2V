@@ -191,8 +191,8 @@ def validate_args(args):
         raise ValueError("Worker, episode, shard, cache, and timeout values must be positive")
     if args.max_steps < 0:
         raise ValueError("--max-steps cannot be negative")
-    if args.expected_action_infer_steps != 1:
-        raise ValueError("This evaluation requires action_infer_steps=1")
+    if args.expected_action_infer_steps <= 0:
+        raise ValueError("--expected-action-infer-steps must be positive")
     args.env_workers_by_device = resolve_env_workers_by_device(
         args.devices,
         args.env_workers_per_device,
