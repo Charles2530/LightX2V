@@ -10,6 +10,7 @@ if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
 import aggregate_fastwam_libero_shared_results as aggregate
+import aggregate_fastwam_libero_five_model_results as five_model
 
 
 def log_manifest(path, command):
@@ -135,8 +136,15 @@ def write_json(path, payload):
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def make_weight(results_root, label, adapter, render_backend=None):
-    protocol_root = results_root / label / "official_protocol_shared_policy"
+def make_weight(
+    results_root,
+    label,
+    adapter,
+    render_backend=None,
+    action_infer_steps=1,
+    protocol_directory="official_protocol_shared_policy",
+):
+    protocol_root = results_root / label / protocol_directory
     metric_path = results_root / "metric.py"
     metric_sha256 = aggregate.sha256_file(metric_path) if metric_path.is_file() else "metric-hash"
     official = {
@@ -184,7 +192,8 @@ def make_weight(results_root, label, adapter, render_backend=None):
         log = protocol_root / f"server-cuda-{device}.log"
         command = (
             "python eval_fastwam_libero_shared_policy.py "
-            "--expected-action-infer-steps 1 --expected-actions-per-plan 10 --seed 0"
+            f"--expected-action-infer-steps {action_infer_steps} "
+            "--expected-actions-per-plan 10 --seed 0"
         )
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(f"\n[2026-01-01T00:00:00Z] {command}\n", encoding="utf-8")
@@ -209,7 +218,7 @@ def make_weight(results_root, label, adapter, render_backend=None):
         "episodes_per_task": 50,
         "expected_shards": len(tasks),
         "seed": 0,
-        "expected_action_infer_steps": 1,
+        "expected_action_infer_steps": action_infer_steps,
         "expected_actions_per_plan": 10,
         "prompt_cache_mode": "lazy-lru",
         "text_encoder_released": False,
@@ -222,7 +231,7 @@ def make_weight(results_root, label, adapter, render_backend=None):
     summary = {
         "adapter": str(adapter.resolve()),
         "evaluation_mode": aggregate.EVALUATION_MODE,
-        "action_infer_steps": 1,
+        "action_infer_steps": action_infer_steps,
         "actions_per_plan": 10,
         "seed": 0,
         "max_policy_steps": 600,
@@ -243,7 +252,7 @@ def make_weight(results_root, label, adapter, render_backend=None):
                 "started_at": "2026-01-01T00:00:00Z",
                 "finished_at": f"2026-01-01T00:00:{index + 1:02d}Z",
                 "protocol": {
-                    "action_infer_steps": 1,
+                    "action_infer_steps": action_infer_steps,
                     "actions_per_plan": 10,
                     "seed": 0,
                     "prompt_cache_mode": "lazy-lru",
@@ -441,3 +450,104 @@ def test_verifies_four_shared_policy_weights(tmp_path, monkeypatch):
     assert task["average_policy_steps"] == 110.0
     assert task["rollout_elapsed_seconds"] == 50.0
     assert len((results_root / "comparison_summary.csv").read_text().splitlines()) == 49
+
+
+def test_validates_twenty_step_shared_policy_weight(tmp_path):
+    results_root = tmp_path / "results"
+    adapter = tmp_path / "native.pt"
+    make_weight(results_root, "native_20step", adapter, action_infer_steps=20)
+
+    validated = aggregate.validate_weight(
+        "native_20step",
+        results_root / "native_20step",
+        adapter,
+        None,
+        "official_protocol_shared_policy",
+        expected_action_infer_steps=20,
+        expected_actions_per_plan=10,
+    )
+
+    output = validated["output"]
+    assert output["action_infer_steps"] == 20
+    assert output["actions_per_plan"] == 10
+    assert all(item["action_infer_steps"] == 20 for item in output["server_log_evidence"])
+
+
+def test_five_model_spec_requires_requested_steps_and_actions(tmp_path):
+    values = [
+        [label, str(tmp_path / label), "protocol", str(tmp_path / f"{label}.pt"), str(steps), "10"]
+        for label, steps in five_model.EXPECTED_MODELS.items()
+    ]
+
+    models = five_model.parse_models(values)
+    assert {item["label"]: item["action_infer_steps"] for item in models} == (
+        five_model.EXPECTED_MODELS
+    )
+
+    values[0][-2] = "1"
+    with pytest.raises(ValueError, match="Unexpected action inference steps"):
+        five_model.parse_models(values)
+
+
+def test_verifies_five_models_with_different_inference_steps(tmp_path, monkeypatch):
+    results_root = tmp_path / "results"
+    (results_root / "stats.json").parent.mkdir(parents=True)
+    (results_root / "stats.json").write_text("stats", encoding="utf-8")
+    (results_root / "policy.json").write_text("policy", encoding="utf-8")
+    native_adapter = tmp_path / "native.pt"
+    adapters = {
+        "native_20step": native_adapter,
+        "native_1step": native_adapter,
+        "joint_30k": tmp_path / "joint.pt",
+        "lora_only_30k": tmp_path / "lora.pt",
+        "old_joint_30k": tmp_path / "old-joint.pt",
+    }
+    values = []
+    for label, steps in five_model.EXPECTED_MODELS.items():
+        make_weight(
+            results_root,
+            label,
+            adapters[label],
+            action_infer_steps=steps,
+        )
+        values.append(
+            [
+                label,
+                str(results_root / label),
+                "official_protocol_shared_policy",
+                str(adapters[label]),
+                str(steps),
+                "10",
+            ]
+        )
+
+    task_counts = {
+        "libero_spatial": 4,
+        "libero_object": 1,
+        "libero_goal": 1,
+        "libero_10": 1,
+    }
+    monkeypatch.setattr(
+        five_model.shared,
+        "load_task_catalog_audit",
+        lambda path: {
+            "task_counts": task_counts,
+            "total_tasks": 7,
+            "output": {"path": str(path), "sha256": "synthetic"},
+        },
+    )
+
+    weights, reference, task_catalog = five_model.validate_requested_models(
+        five_model.parse_models(values), tmp_path / "catalog.json"
+    )
+    payload = five_model.build_payload(weights, reference, task_catalog)
+
+    assert payload["verification"]["all_five_requested_models_complete"]
+    assert payload["verification"]["same_episode_catalog_seed_and_initial_states"]
+    assert payload["verification"]["total_episodes_per_model"] == 350
+    assert payload["verification"]["total_episodes_all_models"] == 1750
+    assert weights["native_20step"]["action_infer_steps"] == 20
+    assert weights["native_1step"]["action_infer_steps"] == 1
+    assert weights["native_20step"]["checkpoint"]["sha256"] == weights[
+        "native_1step"
+    ]["checkpoint"]["sha256"]

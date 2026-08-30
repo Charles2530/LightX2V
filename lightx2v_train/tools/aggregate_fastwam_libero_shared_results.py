@@ -303,7 +303,12 @@ def validate_manifest_against_snapshot(manifest, snapshot):
         raise RuntimeError("Command manifest differs from frozen render backend")
 
 
-def validate_server_logs(manifest):
+def validate_server_logs(
+    manifest,
+    expected_action_infer_steps=common.ACTION_INFER_STEPS,
+    expected_actions_per_plan=10,
+    expected_seed=common.SEED,
+):
     evidence = []
     for item in manifest["commands"]:
         path = Path(item["log"]).expanduser().resolve()
@@ -333,9 +338,9 @@ def validate_server_logs(manifest):
                 f"Latest policy-server launch in {path}:{current_launch['line']} differs from commands.json"
             )
         required = (
-            "--expected-action-infer-steps 1",
-            "--expected-actions-per-plan 10",
-            "--seed 0",
+            f"--expected-action-infer-steps {expected_action_infer_steps}",
+            f"--expected-actions-per-plan {expected_actions_per_plan}",
+            f"--seed {expected_seed}",
         )
         missing = [token for token in required if token not in current_launch["command"]]
         if missing:
@@ -360,9 +365,9 @@ def validate_server_logs(manifest):
                 "historical_launch_count": len(launches) - 1,
                 "historical_error_markers": len(historical_errors),
                 "commands_match_manifest": True,
-                "action_infer_steps": common.ACTION_INFER_STEPS,
-                "actions_per_plan": 10,
-                "seed": common.SEED,
+                "action_infer_steps": expected_action_infer_steps,
+                "actions_per_plan": expected_actions_per_plan,
+                "seed": expected_seed,
                 "error_markers": 0,
             }
         )
@@ -385,7 +390,7 @@ def validate_episode_outcome(label, key, episode):
 
 
 def expected_render_environment(manifest, command):
-    backend = manifest.get("render_backend", {})
+    backend = manifest.get("render_backend") or {}
     if backend.get("name") != "nvidia-egl":
         return None
     return {
@@ -399,7 +404,16 @@ def expected_render_environment(manifest, command):
     }
 
 
-def validate_shards(protocol_root, expected_shards, official, implementation, manifest):
+def validate_shards(
+    protocol_root,
+    expected_shards,
+    official,
+    implementation,
+    manifest,
+    expected_action_infer_steps=common.ACTION_INFER_STEPS,
+    expected_actions_per_plan=10,
+    expected_seed=common.SEED,
+):
     paths = sorted((protocol_root / "shards").glob("*.json"))
     if len(paths) != expected_shards:
         raise RuntimeError(f"{protocol_root} has {len(paths)} shards, expected {expected_shards}")
@@ -413,9 +427,9 @@ def validate_shards(protocol_root, expected_shards, official, implementation, ma
             raise RuntimeError(f"Incomplete shard: {path}")
         protocol = payload.get("protocol", {})
         if (
-            int(protocol.get("action_infer_steps", -1)) != common.ACTION_INFER_STEPS
-            or int(protocol.get("actions_per_plan", -1)) != 10
-            or int(protocol.get("seed", -1)) != common.SEED
+            int(protocol.get("action_infer_steps", -1)) != expected_action_infer_steps
+            or int(protocol.get("actions_per_plan", -1)) != expected_actions_per_plan
+            or int(protocol.get("seed", -1)) != expected_seed
             or protocol.get("prompt_cache_mode") != "lazy-lru"
             or protocol.get("text_encoder_released") is not False
             or protocol.get("official_evaluation") != official
@@ -440,7 +454,16 @@ def validate_shards(protocol_root, expected_shards, official, implementation, ma
     }
 
 
-def validate_weight(label, result_dir, expected_adapter, reference, protocol_directory, snapshot=None):
+def validate_weight(
+    label,
+    result_dir,
+    expected_adapter,
+    reference,
+    protocol_directory,
+    snapshot=None,
+    expected_action_infer_steps=common.ACTION_INFER_STEPS,
+    expected_actions_per_plan=10,
+):
     protocol_root = result_dir / protocol_directory
     summary_path = protocol_root / "summary.json"
     commands_path = protocol_root / "commands.json"
@@ -457,8 +480,8 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
     if result.get("evaluation_mode") != EVALUATION_MODE or manifest.get("evaluation_mode") != EVALUATION_MODE:
         raise RuntimeError(f"{label} is not a shared-policy evaluation")
     if (
-        result.get("action_infer_steps") != common.ACTION_INFER_STEPS
-        or result.get("actions_per_plan") != 10
+        result.get("action_infer_steps") != expected_action_infer_steps
+        or result.get("actions_per_plan") != expected_actions_per_plan
         or result.get("seed") != common.SEED
         or result.get("max_policy_steps") != common.MAX_POLICY_STEPS
         or result.get("evaluation_protocol") != f"{common.EPISODES_PER_TASK}_episodes_per_task"
@@ -468,8 +491,8 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
     if (
         manifest.get("episodes_per_task") != common.EPISODES_PER_TASK
         or manifest.get("seed") != common.SEED
-        or manifest.get("expected_action_infer_steps") != common.ACTION_INFER_STEPS
-        or manifest.get("expected_actions_per_plan") != 10
+        or manifest.get("expected_action_infer_steps") != expected_action_infer_steps
+        or manifest.get("expected_actions_per_plan") != expected_actions_per_plan
         or manifest.get("devices") != [1, 2, 3, 4, 5, 6, 7]
         or manifest.get("prompt_cache_mode") != "lazy-lru"
         or manifest.get("text_encoder_released") is not False
@@ -545,9 +568,21 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
         raise RuntimeError(f"{label} episode catalog differs from native")
 
     wall_clock = validate_shards(
-        protocol_root, expected_shards, official, implementation, manifest
+        protocol_root,
+        expected_shards,
+        official,
+        implementation,
+        manifest,
+        expected_action_infer_steps,
+        expected_actions_per_plan,
+        common.SEED,
     )
-    logs = validate_server_logs(manifest)
+    logs = validate_server_logs(
+        manifest,
+        expected_action_infer_steps,
+        expected_actions_per_plan,
+        common.SEED,
+    )
     return {
         "reference": {
             "task_counts": task_counts,
@@ -572,7 +607,8 @@ def validate_weight(label, result_dir, expected_adapter, reference, protocol_dir
             "episodes_per_task": common.EPISODES_PER_TASK,
             "total_episodes": expected_episodes,
             "seed": common.SEED,
-            "action_infer_steps": common.ACTION_INFER_STEPS,
+            "action_infer_steps": expected_action_infer_steps,
+            "actions_per_plan": expected_actions_per_plan,
             "prompt_cache_mode": "lazy-lru-with-retained-text-encoder",
             "official_evaluation": official,
             "wall_clock": wall_clock,

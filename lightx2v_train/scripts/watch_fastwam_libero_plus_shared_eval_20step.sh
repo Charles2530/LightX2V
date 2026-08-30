@@ -13,6 +13,12 @@ PROTOCOL_ROOT="$OUTPUT_ROOT/native_20step/$PROTOCOL_DIRECTORY"
 SUMMARY="$PROTOCOL_ROOT/summary.json"
 LAUNCH_LOG="$OUTPUT_ROOT/launcher.log"
 WATCHDOG_LOG="$OUTPUT_ROOT/watchdog.log"
+ONE_STEP_ROOT=${ONE_STEP_ROOT:-/mnt/afs_1/charles/codes/LIBERO-plus/eval_results/fastwam_1step_30k}
+ONE_STEP_PROTOCOL_DIRECTORY=${ONE_STEP_PROTOCOL_DIRECTORY:-official_protocol_shared_policy_nvidia_egl_550_90_07_cuda5_egl4_cuda7_egl6_12w_frozen_fcf10f6a}
+TASK_CATALOG_AUDIT=${TASK_CATALOG_AUDIT:-$ONE_STEP_ROOT/TASK_CATALOG_RESOURCE_AUDIT.json}
+FINAL_AGGREGATOR="$ROOT/lightx2v_train/tools/aggregate_fastwam_libero_five_model_results.py"
+FINAL_JSON="$OUTPUT_ROOT/five_model_comparison_summary.json"
+FINAL_CSV="$OUTPUT_ROOT/five_model_comparison_summary.csv"
 CHECK_SECONDS=${CHECK_SECONDS:-300}
 STALL_TIMEOUT_SECONDS=${STALL_TIMEOUT_SECONDS:-3600}
 
@@ -48,6 +54,23 @@ latest_progress_epoch() {
     fi
 }
 
+run_final_aggregator() {
+    "$PYTHON" "$FINAL_AGGREGATOR" \
+        --model native_20step "$OUTPUT_ROOT/native_20step" "$PROTOCOL_DIRECTORY" \
+            /mnt/afs_1/charles/models/fastwam/libero_uncond_2cam224.pt 20 10 \
+        --model native_1step "$ONE_STEP_ROOT/native" "$ONE_STEP_PROTOCOL_DIRECTORY" \
+            /mnt/afs_1/charles/models/fastwam/libero_uncond_2cam224.pt 1 10 \
+        --model joint_30k "$ONE_STEP_ROOT/joint_30k" "$ONE_STEP_PROTOCOL_DIRECTORY" \
+            /mnt/afs_1/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_joint/exports/checkpoint-000030000-student.pt 1 10 \
+        --model lora_only_30k "$ONE_STEP_ROOT/lora_only_30k" "$ONE_STEP_PROTOCOL_DIRECTORY" \
+            /mnt/afs_1/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_only/exports/checkpoint-000030000-student.pt 1 10 \
+        --model old_joint_30k "$ONE_STEP_ROOT/old_success_baseline_30k" "$ONE_STEP_PROTOCOL_DIRECTORY" \
+            /mnt/afs_1/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_libero_action_1step_dmd_lora_16gpu_mbs48_nogc/exports/checkpoint-000030000-student.pt 1 10 \
+        --task-catalog-audit "$TASK_CATALOG_AUDIT" \
+        --output-json "$FINAL_JSON" \
+        --output-csv "$FINAL_CSV"
+}
+
 last_progress_at=$(date +%s)
 while ! summary_complete; do
     if tmux has-session -t "$PREREQUISITE_SESSION" 2>/dev/null; then
@@ -80,5 +103,12 @@ while ! summary_complete; do
     sleep "$CHECK_SECONDS"
 done
 
-printf '[%s] 20-step evaluation complete\n' \
+printf '[%s] 20-step evaluation complete; generating five-model comparison\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WATCHDOG_LOG"
+until run_final_aggregator >> "$WATCHDOG_LOG" 2>&1; do
+    printf '[%s] five-model aggregation failed; retrying in %ss\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CHECK_SECONDS" >> "$WATCHDOG_LOG"
+    sleep "$CHECK_SECONDS"
+done
+printf '[%s] five-model comparison complete: %s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$FINAL_JSON" >> "$WATCHDOG_LOG"
