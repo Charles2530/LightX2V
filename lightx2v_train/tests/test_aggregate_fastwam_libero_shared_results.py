@@ -48,6 +48,29 @@ def test_rejects_log_with_error_marker(tmp_path):
         aggregate.validate_server_logs(log_manifest(log, command))
 
 
+def test_latest_log_segment_ignores_but_records_historical_failures(tmp_path):
+    old_command = (
+        "python eval_fastwam_libero_shared_policy.py "
+        "--expected-action-infer-steps 1 --expected-actions-per-plan 10 --seed 0 --env-workers 8"
+    )
+    command = old_command.replace("--env-workers 8", "--env-workers 1")
+    log = tmp_path / "server.log"
+    log.write_text(
+        f"[2026-01-01T00:00:00Z] {old_command}\n"
+        "Traceback (most recent call last):\n"
+        f"[2026-01-02T00:00:00Z] {command}\n"
+        "current rollout output\n",
+        encoding="utf-8",
+    )
+
+    evidence = aggregate.validate_server_logs(log_manifest(log, command))[0]
+    assert evidence["launch_count"] == 2
+    assert evidence["historical_launch_count"] == 1
+    assert evidence["historical_error_markers"] == 1
+    assert evidence["current_launch_line_number"] == 3
+    assert evidence["error_markers"] == 0
+
+
 def test_rejects_checkpoint_changed_after_snapshot(tmp_path):
     checkpoint = tmp_path / "adapter.pt"
     checkpoint.write_bytes(b"current")

@@ -310,8 +310,8 @@ def validate_server_logs(manifest):
         if not path.is_file():
             raise FileNotFoundError(f"Missing policy-server log: {path}")
         expected_command = item["command"]
-        launch_lines = []
-        errors = []
+        launches = []
+        all_errors = []
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             for line_number, raw_line in enumerate(handle, start=1):
@@ -319,37 +319,46 @@ def validate_server_logs(manifest):
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
                 if "eval_fastwam_libero_shared_policy.py" in line and line.startswith("["):
                     _, separator, command = line.partition("] ")
-                    if not separator or command != expected_command:
-                        raise RuntimeError(
-                            f"Policy-server launch in {path}:{line_number} differs from commands.json"
-                        )
-                    required = (
-                        "--expected-action-infer-steps 1",
-                        "--expected-actions-per-plan 10",
-                        "--seed 0",
-                    )
-                    missing = [token for token in required if token not in command]
-                    if missing:
-                        raise RuntimeError(
-                            f"Policy-server log {path}:{line_number} is missing {missing}"
-                        )
-                    launch_lines.append(line_number)
+                    if separator:
+                        launches.append({"line": line_number, "command": command})
                 if any(marker in line for marker in LOG_ERROR_MARKERS) or (
                     "Environment worker " in line and " failed:" in line
                 ):
-                    errors.append({"line": line_number, "text": line[:500]})
-        if not launch_lines:
+                    all_errors.append({"line": line_number, "text": line[:500]})
+        if not launches:
             raise RuntimeError(f"Policy-server log has no recorded launch command: {path}")
-        if errors:
-            raise RuntimeError(f"Policy-server log contains error markers: {path}: {errors[:3]}")
+        current_launch = launches[-1]
+        if current_launch["command"] != expected_command:
+            raise RuntimeError(
+                f"Latest policy-server launch in {path}:{current_launch['line']} differs from commands.json"
+            )
+        required = (
+            "--expected-action-infer-steps 1",
+            "--expected-actions-per-plan 10",
+            "--seed 0",
+        )
+        missing = [token for token in required if token not in current_launch["command"]]
+        if missing:
+            raise RuntimeError(
+                f"Policy-server log {path}:{current_launch['line']} is missing {missing}"
+            )
+        current_errors = [item for item in all_errors if item["line"] > current_launch["line"]]
+        historical_errors = [item for item in all_errors if item["line"] < current_launch["line"]]
+        if current_errors:
+            raise RuntimeError(
+                f"Current policy-server log segment contains error markers: {path}: "
+                f"{current_errors[:3]}"
+            )
         evidence.append(
             {
                 "physical_cuda_device": int(item["physical_cuda_device"]),
                 "path": str(path),
                 "size_bytes": path.stat().st_size,
                 "sha256": digest.hexdigest(),
-                "launch_count": len(launch_lines),
-                "launch_line_numbers": launch_lines,
+                "launch_count": len(launches),
+                "current_launch_line_number": current_launch["line"],
+                "historical_launch_count": len(launches) - 1,
+                "historical_error_markers": len(historical_errors),
                 "commands_match_manifest": True,
                 "action_infer_steps": common.ACTION_INFER_STEPS,
                 "actions_per_plan": 10,
