@@ -38,6 +38,15 @@ fi
 if [[ -n "${ENV_WORKERS_PER_DEVICE:-}" ]]; then
     tmux set-environment -g ENV_WORKERS_PER_DEVICE "$ENV_WORKERS_PER_DEVICE"
 fi
+if [[ -n "${LAUNCHER_ROOT:-}" ]]; then
+    tmux set-environment -g LAUNCHER_ROOT "$LAUNCHER_ROOT"
+fi
+if [[ -n "${FASTWAM_EVALUATION_ROOT:-}" ]]; then
+    tmux set-environment -g FASTWAM_EVALUATION_ROOT "$FASTWAM_EVALUATION_ROOT"
+fi
+if [[ -n "${ENV_WORKERS_PER_DEVICE_OVERRIDES:-}" ]]; then
+    tmux set-environment -g ENV_WORKERS_PER_DEVICE_OVERRIDES "$ENV_WORKERS_PER_DEVICE_OVERRIDES"
+fi
 
 latest_progress_epoch() {
     local latest

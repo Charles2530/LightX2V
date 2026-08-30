@@ -10,8 +10,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-TOOLS_ROOT = Path(__file__).resolve().parent
+LAUNCHER_ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get("FASTWAM_EVALUATION_ROOT", LAUNCHER_ROOT)).expanduser().resolve()
+TOOLS_ROOT = ROOT / "lightx2v_train" / "tools"
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
@@ -31,6 +32,13 @@ def parse_args():
     parser.add_argument("--task-ids", nargs="+", type=int)
     parser.add_argument("--devices", nargs="+", type=int, default=[1, 2, 3, 4, 5, 6, 7])
     parser.add_argument("--env-workers-per-device", type=int, default=32)
+    parser.add_argument(
+        "--env-workers-per-device-override",
+        action="append",
+        default=[],
+        metavar="DEVICE=COUNT",
+        help="Override environment worker count for one physical CUDA device; repeat as needed",
+    )
     parser.add_argument("--episodes-per-task", type=int, default=50)
     parser.add_argument("--episode-offset", type=int, default=0)
     parser.add_argument("--tasks-per-shard", type=int, default=1)
@@ -96,6 +104,39 @@ def resolve_nvidia_egl_runtime(path):
     }
 
 
+def resolve_env_workers_by_device(devices, default_count, overrides):
+    workers = {int(device): int(default_count) for device in devices}
+    seen = set()
+    for value in overrides:
+        device_text, separator, count_text = value.partition("=")
+        if not separator:
+            raise ValueError(
+                f"Invalid --env-workers-per-device-override {value!r}; expected DEVICE=COUNT"
+            )
+        try:
+            device = int(device_text)
+            count = int(count_text)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid --env-workers-per-device-override {value!r}; expected integer DEVICE=COUNT"
+            ) from exc
+        if device not in workers:
+            raise ValueError(f"Worker override device {device} is not present in --devices")
+        if device in seen:
+            raise ValueError(f"Duplicate worker override for CUDA device {device}")
+        if count <= 0:
+            raise ValueError(f"Worker override for CUDA device {device} must be positive")
+        workers[device] = count
+        seen.add(device)
+    return workers
+
+
+def env_workers_for_device(args, device_index):
+    return getattr(args, "env_workers_by_device", {}).get(
+        int(device_index), args.env_workers_per_device
+    )
+
+
 def validate_args(args):
     if not Path(args.adapter).expanduser().is_file():
         raise FileNotFoundError(args.adapter)
@@ -114,6 +155,11 @@ def validate_args(args):
         raise ValueError("--max-steps cannot be negative")
     if args.expected_action_infer_steps != 1:
         raise ValueError("This evaluation requires action_infer_steps=1")
+    args.env_workers_by_device = resolve_env_workers_by_device(
+        args.devices,
+        args.env_workers_per_device,
+        args.env_workers_per_device_override,
+    )
     args.nvidia_egl_runtime = resolve_nvidia_egl_runtime(args.nvidia_egl_root)
 
 
@@ -152,7 +198,7 @@ def server_command(args, device_index, assignment_index, output_root, ready_path
         "--device",
         "cuda:0",
         "--env-workers",
-        str(args.env_workers_per_device),
+        str(env_workers_for_device(args, device_index)),
         "--prompt-cache-limit",
         str(args.prompt_cache_limit),
         "--assignment-index",
@@ -198,13 +244,17 @@ def build_manifest(args, output_root, selected_tasks, shards, commands, official
         "text_encoder_released": False,
         "devices": list(args.devices),
         "env_workers_per_device": args.env_workers_per_device,
+        "env_workers_by_device": {
+            str(device): env_workers_for_device(args, device) for device in args.devices
+        },
         "render_backend": args.nvidia_egl_runtime or {"name": "system-egl"},
         "official_evaluation": official,
         "fastwam_evaluation_implementation": implementation,
         "launcher_implementation": {
             "lightx2v_train/tools/eval_fastwam_libero_shared_checkpoint.py": shared_eval.file_record(
                 Path(__file__).resolve()
-            )
+            ),
+            "frozen_evaluation_root": str(ROOT),
         },
         "commands": commands,
         "output_root": str(output_root),
@@ -437,6 +487,7 @@ def main():
         item = {
             "physical_cuda_device": device,
             "assignment_index": assignment_index,
+            "env_workers": env_workers_for_device(args, device),
             "cuda_visible_devices": visible_devices,
             "mujoco_egl_device_id": egl_device_id,
             "ready_file": str(ready_path),
@@ -459,7 +510,7 @@ def main():
     atomic_json_dump(manifest, output_root / "commands.json")
     print(
         f"[catalog] task_counts={manifest['task_counts']} shards={len(shards)} "
-        f"servers={len(command_items)} env_workers_per_device={args.env_workers_per_device}",
+        f"servers={len(command_items)} env_workers_by_device={manifest['env_workers_by_device']}",
         flush=True,
     )
     if args.dry_run:

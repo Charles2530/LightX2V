@@ -9,10 +9,11 @@ export NUMEXPR_NUM_THREADS=1
 
 WORKSPACE_ROOT=${WORKSPACE_ROOT:-/mnt/afs_1/charles/codes/LightX2V_fastwam}
 EVAL_ROOT=${EVAL_ROOT:-$WORKSPACE_ROOT}
+LAUNCHER_ROOT=${LAUNCHER_ROOT:-$EVAL_ROOT}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-$WORKSPACE_ROOT}
 PYTHON=${PYTHON:-/mnt/afs_1/charles/env/miniconda3/envs/lightx2v_libero_plus/bin/python}
-EVALUATOR="$EVAL_ROOT/lightx2v_train/tools/eval_fastwam_libero_shared_checkpoint.py"
-AGGREGATOR="$EVAL_ROOT/lightx2v_train/tools/aggregate_fastwam_libero_shared_results.py"
+EVALUATOR="$LAUNCHER_ROOT/lightx2v_train/tools/eval_fastwam_libero_shared_checkpoint.py"
+AGGREGATOR="$LAUNCHER_ROOT/lightx2v_train/tools/aggregate_fastwam_libero_shared_results.py"
 OUTPUT_ROOT=/mnt/afs_1/charles/codes/LIBERO-plus/eval_results/fastwam_1step_30k
 MODEL_PATH=/mnt/afs_1/charles/models/Wan2.2-TI2V-5B
 POLICY_CONFIG="$EVAL_ROOT/configs/fastwam/libero_plus_i2va_dmd_1step.json"
@@ -20,8 +21,17 @@ DATASET_STATS=/mnt/afs_1/charles/models/fastwam/libero_uncond_2cam224_dataset_st
 LIBERO_ROOT=/mnt/afs_1/charles/codes/LIBERO-plus
 NVIDIA_EGL_ROOT=${NVIDIA_EGL_ROOT:-/mnt/afs_1/charles/env/nvidia-egl-550.90.07/root}
 ENV_WORKERS_PER_DEVICE=${ENV_WORKERS_PER_DEVICE:-12}
+ENV_WORKERS_PER_DEVICE_OVERRIDES=${ENV_WORKERS_PER_DEVICE_OVERRIDES:-}
 PROTOCOL_DIRECTORY=${PROTOCOL_DIRECTORY:-official_protocol_shared_policy}
 SCRIPT_ARGS=("$@")
+WORKER_OVERRIDE_ARGS=()
+if [[ -n "$ENV_WORKERS_PER_DEVICE_OVERRIDES" ]]; then
+    read -r -a worker_overrides <<< "$ENV_WORKERS_PER_DEVICE_OVERRIDES"
+    for worker_override in "${worker_overrides[@]}"; do
+        WORKER_OVERRIDE_ARGS+=(--env-workers-per-device-override "$worker_override")
+    done
+fi
+export FASTWAM_EVALUATION_ROOT=${FASTWAM_EVALUATION_ROOT:-$EVAL_ROOT}
 
 evaluate_adapter() {
     local label=$1
@@ -35,6 +45,7 @@ evaluate_adapter() {
         --libero-root "$LIBERO_ROOT" \
         --devices 1 2 3 4 5 6 7 \
         --env-workers-per-device "$ENV_WORKERS_PER_DEVICE" \
+        "${WORKER_OVERRIDE_ARGS[@]}" \
         --episodes-per-task 50 \
         --tasks-per-shard 1 \
         --seed 0 \

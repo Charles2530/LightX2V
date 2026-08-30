@@ -201,14 +201,25 @@ def test_nvidia_egl_server_environment_uses_physical_device(tmp_path, monkeypatc
         expected_action_infer_steps=1,
         expected_actions_per_plan=10,
         env_workers_per_device=1,
+        env_workers_by_device={7: 1},
         prompt_cache_limit=1,
         task_ids=[0],
         max_steps=0,
         devices=[7],
         nvidia_egl_runtime=runtime,
     )
-    _, visible_devices, egl_device_id = shared_checkpoint.server_command(
+    command, visible_devices, egl_device_id = shared_checkpoint.server_command(
         command_args, 7, 0, tmp_path / "output", tmp_path / "ready.json"
     )
     assert visible_devices == "7"
     assert egl_device_id == "7"
+    assert command[command.index("--env-workers") + 1] == "1"
+
+
+def test_per_device_environment_worker_overrides():
+    workers = shared_checkpoint.resolve_env_workers_by_device(
+        devices=[1, 2, 5],
+        default_count=12,
+        overrides=["5=1"],
+    )
+    assert workers == {1: 12, 2: 12, 5: 1}
