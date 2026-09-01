@@ -5,3 +5,7 @@ def prepare_data(config):
         from .libero.preparation import prepare_libero_fastwam_assets
 
         prepare_libero_fastwam_assets(config)
+    if "robotwin_fastwam_dataset" in data_names:
+        from .robotwin_preparation import prepare_robotwin_fastwam_assets
+
+        prepare_robotwin_fastwam_assets(config)

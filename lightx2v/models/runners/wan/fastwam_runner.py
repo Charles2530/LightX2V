@@ -19,6 +19,9 @@ from lightx2v.utils.registry_factory import RUNNER_REGISTER
 
 AGENTVIEW_IMAGE_NAME = "agentview_image.png"
 WRIST_IMAGE_NAME = "wrist_image.png"
+ROBOTWIN_HEAD_IMAGE_NAME = "head_camera.png"
+ROBOTWIN_LEFT_IMAGE_NAME = "left_camera.png"
+ROBOTWIN_RIGHT_IMAGE_NAME = "right_camera.png"
 
 
 def resize_rgb(image, width, height):
@@ -385,7 +388,13 @@ class FastWAMRunner(BaseRunner):
             return str(Path(self.input_info.save_result_path).expanduser().resolve().with_suffix(".actions.npy"))
         raise ValueError("FastWAM requires `save_action_path` or `save_result_path`.")
 
-    def _load_image_pair(self):
+    def _load_images(self):
+        if self.policy.policy_profile == "robotwin":
+            return self._load_robotwin_images()
+        agentview, wrist = self._load_libero_image_pair()
+        return {"agentview": agentview, "wrist": wrist}
+
+    def _load_libero_image_pair(self):
         image_path = getattr(self.input_info, "image_path", "") or ""
         if not image_path:
             raise ValueError("FastWAM requires `image_path`.")
@@ -402,14 +411,39 @@ class FastWAMRunner(BaseRunner):
 
         return self._load_rgb(agentview), self._load_rgb(wrist)
 
+    def _load_robotwin_images(self):
+        image_path = getattr(self.input_info, "image_path", "") or ""
+        if not image_path:
+            raise ValueError("FastWAM RobotWin requires `image_path`.")
+
+        image_path = os.path.expanduser(str(image_path))
+        if os.path.isdir(image_path):
+            paths = {
+                "head_camera": os.path.join(image_path, ROBOTWIN_HEAD_IMAGE_NAME),
+                "left_camera": os.path.join(image_path, ROBOTWIN_LEFT_IMAGE_NAME),
+                "right_camera": os.path.join(image_path, ROBOTWIN_RIGHT_IMAGE_NAME),
+            }
+        else:
+            items = [item.strip() for item in image_path.split(",") if item.strip()]
+            if len(items) != 3:
+                raise ValueError("FastWAM RobotWin `image_path` must be a directory or three comma-separated image paths.")
+            paths = {
+                "head_camera": items[0],
+                "left_camera": items[1],
+                "right_camera": items[2],
+            }
+
+        return {name: self._load_rgb(path) for name, path in paths.items()}
+
     @staticmethod
     def _load_rgb(path):
         return np.asarray(Image.open(os.path.expanduser(str(path))).convert("RGB"))
 
     def _load_state(self):
         state_path = getattr(self.input_info, "state_path", "") or ""
+        expected_dim = int(getattr(self.policy, "robot_state_dim", self.config.get("robot_state_dim", 8)))
         if not state_path:
-            raise ValueError("FastWAM requires `state_path` with 8 floats.")
+            raise ValueError(f"FastWAM requires `state_path` with {expected_dim} floats.")
         state_path = str(Path(state_path).expanduser().resolve())
         suffix = Path(state_path).suffix.lower()
 
@@ -431,8 +465,8 @@ class FastWAMRunner(BaseRunner):
                     payload = payload[key]
                     break
         state = np.asarray(payload, dtype=np.float32).reshape(-1)
-        if state.size != 8:
-            raise ValueError(f"FastWAM LIBERO state must contain 8 floats, got {state.size}.")
+        if state.size != expected_dim:
+            raise ValueError(f"FastWAM state must contain {expected_dim} floats, got {state.size}.")
         return state
 
     def _save_actions(self, actions):
@@ -448,12 +482,12 @@ class FastWAMRunner(BaseRunner):
     def run_pipeline(self, input_info):
         self.input_info = input_info
         if not self.input_info.prompt:
-            raise ValueError("FastWAM requires `prompt` as the LIBERO task description.")
+            raise ValueError("FastWAM requires `prompt` as the task description.")
 
-        agentview, wrist = self._load_image_pair()
+        images = self._load_images()
         state = self._load_state()
         actions = self.policy.predict_action_chunk(
-            images={"agentview": agentview, "wrist": wrist},
+            images=images,
             state=state,
             task_description=self.input_info.prompt,
             seed=self.input_info.seed,

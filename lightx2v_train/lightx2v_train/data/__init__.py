@@ -10,6 +10,10 @@ def __getattr__(name):
         from .libero.dataset import build_libero_fastwam_dataset
 
         return build_libero_fastwam_dataset
+    if name == "build_robotwin_fastwam_dataset":
+        from .robotwin_dataset import build_robotwin_fastwam_dataset
+
+        return build_robotwin_fastwam_dataset
     if name in {"build_latent_dataset", "build_prompt_dataset", "build_video_dataset"}:
         from .video_dataset import build_latent_dataset, build_prompt_dataset, build_video_dataset
 
@@ -29,6 +33,7 @@ __all__ = [
     "build_data",
     "build_image_dataset",
     "build_libero_fastwam_dataset",
+    "build_robotwin_fastwam_dataset",
     "build_latent_dataset",
     "build_prompt_dataset",
     "build_video_dataset",
