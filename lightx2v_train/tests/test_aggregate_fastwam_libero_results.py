@@ -118,4 +118,5 @@ def test_verifies_four_weights_and_writes_comparison(tmp_path, monkeypatch):
     assert comparison["verification"]["total_episodes_per_weight"] == 200
     assert comparison["weights"]["native"]["summary"]["overall"]["success_rate"] == 0.98
     assert comparison["weights"]["joint"]["wall_clock"]["elapsed_seconds"] == 4.0
-    assert len((results_root / "comparison_summary.csv").read_text().splitlines()) == 37
+    assert comparison["weights"]["native"]["summary"]["categories"]["test"]["episodes"] == 200
+    assert len((results_root / "comparison_summary.csv").read_text().splitlines()) == 41

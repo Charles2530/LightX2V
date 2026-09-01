@@ -449,7 +449,8 @@ def test_verifies_four_shared_policy_weights(tmp_path, monkeypatch):
     assert task["failure_reasons"] == {"max_steps_exceeded": 1}
     assert task["average_policy_steps"] == 110.0
     assert task["rollout_elapsed_seconds"] == 50.0
-    assert len((results_root / "comparison_summary.csv").read_text().splitlines()) == 49
+    assert native["summary"]["categories"]["test"]["episodes"] == 350
+    assert len((results_root / "comparison_summary.csv").read_text().splitlines()) == 53
 
 
 def test_validates_twenty_step_shared_policy_weight(tmp_path):

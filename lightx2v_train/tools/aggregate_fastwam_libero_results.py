@@ -109,6 +109,7 @@ def summarize(episodes):
     return {
         "overall": score(episodes),
         "suites": grouped_scores(episodes, lambda item: item["benchmark"]),
+        "categories": grouped_scores(episodes, lambda item: item.get("category")),
         "tasks": tasks,
     }
 
@@ -286,6 +287,8 @@ def csv_rows(weights):
         yield {"weight": label, "scope": "overall", "suite": "", "task_id": "", "task_name": "", "category": "", "difficulty_level": "", **overall}
         for suite, item in result["summary"]["suites"].items():
             yield {"weight": label, "scope": "suite", "suite": suite, "task_id": "", "task_name": "", "category": "", "difficulty_level": "", **item}
+        for category, item in result["summary"]["categories"].items():
+            yield {"weight": label, "scope": "category", "suite": "", "task_id": "", "task_name": "", "category": category, "difficulty_level": "", **item}
         for task_key, item in result["summary"]["tasks"].items():
             suite, task_id = task_key.rsplit("/", 1)
             row = {
