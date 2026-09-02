@@ -16,7 +16,7 @@ def _cast_trainable_parameters_to_fp32(expert):
     return expert
 
 
-def configure_action_role(expert, config):
+def _configure_role(expert, config):
     expert.requires_grad_(False)
     if config.train_type == "full":
         expert.requires_grad_(True)
@@ -35,6 +35,23 @@ def configure_action_role(expert, config):
     expert = get_peft_model(expert, peft_config)
     expert.train()
     return _cast_trainable_parameters_to_fp32(expert)
+
+
+def configure_action_role(expert, config):
+    return _configure_role(expert, config)
+
+
+def configure_video_role(expert, config):
+    """Configure the shared video expert for the optional video-DMD path."""
+    return _configure_role(expert, config)
+
+
+def attach_video_role(module, config):
+    """Wrap the video expert and keep both FastWAM references in sync."""
+    video_expert = configure_video_role(module.video_expert, config)
+    module.video_expert = video_expert
+    module.mot.mixtures["video"] = video_expert
+    return video_expert
 
 
 @dataclass

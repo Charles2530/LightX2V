@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOLS_ROOT = Path(__file__).resolve().parent
@@ -120,7 +121,33 @@ def validate_checkpoint(checkpoint):
     if missing:
         raise FileNotFoundError(f"Incomplete checkpoint {checkpoint}: missing {missing}")
 
+    checkpoint_config = yaml.safe_load((checkpoint / "config.yaml").read_text(encoding="utf-8")) or {}
+    training_config = checkpoint_config.get("training", {})
+    if not isinstance(training_config, dict):
+        raise TypeError(f"Checkpoint config has invalid training section: {checkpoint / 'config.yaml'}")
+    video_enabled_by_config = bool(training_config.get("unfreeze_video", False))
+    if video_enabled_by_config and not (checkpoint / "video.pt").is_file():
+        raise FileNotFoundError(f"Video-unfreeze checkpoint {checkpoint} is missing video.pt")
+    if (
+        video_enabled_by_config
+        and float(training_config.get("video_anchor_weight", 0.0)) > 0.0
+        and not (checkpoint / "video_anchor.pt").is_file()
+    ):
+        raise FileNotFoundError(f"Video-unfreeze checkpoint {checkpoint} is missing video_anchor.pt")
     state = torch.load(checkpoint / "training_state.pt", map_location="cpu", weights_only=False)
+    if bool(state.get("video_enabled", False)) != video_enabled_by_config:
+        raise RuntimeError(
+            f"Checkpoint video metadata disagrees with config in {checkpoint}: "
+            f"state={bool(state.get('video_enabled', False))}, config={video_enabled_by_config}"
+        )
+    if video_enabled_by_config:
+        configured_video = training_config.get("video", {})
+        configured_video_type = configured_video.get("train_type") if isinstance(configured_video, dict) else None
+        if state.get("video_train_type") != configured_video_type:
+            raise RuntimeError(
+                f"Checkpoint video train type disagrees with config in {checkpoint}: "
+                f"state={state.get('video_train_type')}, config={configured_video_type}"
+            )
     iteration = int(state["iteration"])
     world_size = int(state["world_size"])
     rng_files = sorted(checkpoint.glob("rng-rank-*.pt"))

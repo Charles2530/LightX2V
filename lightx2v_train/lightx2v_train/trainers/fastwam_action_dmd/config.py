@@ -37,6 +37,9 @@ class FastWAMActionDmdConfig:
     sigma_min: float
     sigma_max: float
     norm_clip_min: float | None
+    unfreeze_video: bool = False
+    video: ActionRoleConfig | None = None
+    video_anchor_weight: float = 0.0
 
     @classmethod
     def from_mapping(cls, config):
@@ -53,6 +56,19 @@ class FastWAMActionDmdConfig:
         teacher_steps = int(dmd.get("teacher_steps", 20))
         if teacher_steps <= 0:
             raise ValueError("training.action_dmd.teacher_steps must be positive.")
+
+        unfreeze_video = bool(training.get("unfreeze_video", False))
+        video_mapping = training.get("video")
+        if unfreeze_video:
+            if not isinstance(video_mapping, dict):
+                raise TypeError("training.video is required when training.unfreeze_video=true.")
+            video = ActionRoleConfig.from_mapping(video_mapping, "video")
+        else:
+            video = None
+        video_anchor_weight = float(training.get("video_anchor_weight", 0.0))
+        if video_anchor_weight < 0.0:
+            raise ValueError("training.video_anchor_weight must be non-negative.")
+
         return cls(
             student=ActionRoleConfig.from_mapping(training["student"], "student"),
             fake=ActionRoleConfig.from_mapping(training["fake"], "fake"),
@@ -65,4 +81,7 @@ class FastWAMActionDmdConfig:
             sigma_min=sigma_min,
             sigma_max=sigma_max,
             norm_clip_min=None if dmd.get("norm_clip_min") is None else float(dmd["norm_clip_min"]),
+            unfreeze_video=unfreeze_video,
+            video=video,
+            video_anchor_weight=video_anchor_weight,
         )

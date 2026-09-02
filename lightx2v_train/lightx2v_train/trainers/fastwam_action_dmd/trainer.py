@@ -3,6 +3,7 @@ import time
 from copy import deepcopy
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from diffusers.optimization import get_scheduler
 from loguru import logger
@@ -17,9 +18,11 @@ from lightx2v_train.model_zoo.native.wan.fastwam.action_distill import (
 from lightx2v_train.runtime.distributed import (
     barrier,
     get_data_parallel_group,
+    get_data_parallel_world_size,
     get_world_size,
     is_distributed,
     is_main_process,
+    is_sequence_parallel_enabled,
     reduce_mean,
 )
 from lightx2v_train.runtime.monitor import build_monitor
@@ -28,7 +31,7 @@ from lightx2v_train.utils.registry import TRAINER_REGISTER
 
 from .checkpoint import ActionDmdCheckpointManager
 from .config import FastWAMActionDmdConfig
-from .roles import ActionDmdRoles
+from .roles import ActionDmdRoles, attach_video_role
 
 
 def _masked_mse(prediction, target, valid_mask):
@@ -70,6 +73,48 @@ def _optimizer(parameters, config):
     )
 
 
+def _broadcast_parameters(parameters):
+    """Synchronize parameters that are outside the action DDP wrappers."""
+    if not parameters or not is_distributed():
+        return
+    group = get_data_parallel_group()
+    for parameter in parameters:
+        dist.broadcast(parameter.data, src=0, group=group)
+
+
+def _all_reduce_gradients(parameters):
+    """Average gradients for the shared video role across data-parallel ranks."""
+    if not parameters or not is_distributed():
+        return
+    group = get_data_parallel_group()
+    world_size = get_data_parallel_world_size()
+
+    # The video LoRA role contains hundreds of small matrices.  Coalesce them
+    # into one collective per device/dtype bucket instead of launching one NCCL
+    # operation per parameter on every training iteration.
+    buckets = {}
+    for parameter in parameters:
+        buckets.setdefault((parameter.device, parameter.dtype), []).append(parameter)
+    for bucket in buckets.values():
+        flat = torch.cat(
+            [
+                (parameter.grad.detach() if parameter.grad is not None else torch.zeros_like(parameter)).reshape(-1)
+                for parameter in bucket
+            ]
+        )
+        dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=group)
+        flat.div_(world_size)
+        offset = 0
+        for parameter in bucket:
+            length = parameter.numel()
+            averaged = flat[offset : offset + length].view_as(parameter)
+            if parameter.grad is None:
+                parameter.grad = averaged.clone()
+            else:
+                parameter.grad.copy_(averaged)
+            offset += length
+
+
 @TRAINER_REGISTER("fastwam_action_dmd")
 class FastWAMActionDmdTrainer:
     def __init__(self, config):
@@ -93,6 +138,12 @@ class FastWAMActionDmdTrainer:
         self.eval_every_iters = int(self.inference_config.get("infer_every_iters", 0) or 0)
         self.eval_num_samples = max(1, int(self.inference_config.get("num_samples", 1)))
         self.eval_seed = int(self.inference_config.get("seed", 42))
+        self.video_expert = None
+        self.video_params = []
+        self.video_optimizer = None
+        self.video_scheduler = None
+        self.video_anchor_state = {}
+        self.video_anchor_device_state = {}
         self.checkpoints = ActionDmdCheckpointManager(self)
         if is_main_process():
             os.makedirs(self.output_dir, exist_ok=True)
@@ -118,10 +169,28 @@ class FastWAMActionDmdTrainer:
         sequence_parallel_enabled = sequence_parallel.get("enabled", False) if isinstance(sequence_parallel, dict) else bool(sequence_parallel)
         if sequence_parallel_enabled:
             raise ValueError("fastwam_action_dmd does not support sequence parallelism.")
+        if is_sequence_parallel_enabled():
+            raise ValueError("fastwam_action_dmd does not support sequence parallelism.")
         module = self.model.unwrap_module()
         module.eval()
         module.requires_grad_(False)
         self.roles = ActionDmdRoles.build(module.action_expert, self.parsed)
+        if self.parsed.unfreeze_video:
+            if self.parsed.video is None:
+                raise RuntimeError("Video DMD is enabled but no video role configuration was parsed.")
+            self.video_expert = attach_video_role(module, self.parsed.video)
+            self.video_expert.train()
+            module.mot.train()
+            if self.training_config.get("gradient_checkpointing", False):
+                video_module = self.video_expert.get_base_model() if hasattr(self.video_expert, "get_base_model") else self.video_expert
+                video_module.use_gradient_checkpointing = True
+            self.video_params = ActionDmdRoles.trainable_parameters(self.video_expert)
+            if not self.video_params:
+                raise RuntimeError("Video DMD is enabled but has no trainable video parameters.")
+            # PEFT creates adapters independently in each process. Broadcast
+            # before taking the anchor snapshot so every rank starts identically.
+            _broadcast_parameters(self.video_params)
+            self.video_anchor_state = self._capture_video_anchor()
         self.student_denoiser = CachedActionDenoiser(self.roles.student, module.mot)
         self.fake_denoiser = CachedActionDenoiser(self.roles.fake, module.mot)
         self.teacher_denoiser = CachedActionDenoiser(self.roles.teacher, module.mot).eval()
@@ -129,7 +198,10 @@ class FastWAMActionDmdTrainer:
             self.student_denoiser.action_module().use_gradient_checkpointing = True
             self.fake_denoiser.action_module().use_gradient_checkpointing = True
             module.mot.train()
-            module.video_expert.eval()
+            if self.video_expert is None:
+                module.video_expert.eval()
+            else:
+                self.video_expert.train()
         self.student_params = ActionDmdRoles.trainable_parameters(self.roles.student)
         self.fake_params = ActionDmdRoles.trainable_parameters(self.roles.fake)
         if not self.student_params or not self.fake_params:
@@ -144,6 +216,9 @@ class FastWAMActionDmdTrainer:
             num_training_steps=max(1, fake_training_iters * self.parsed.fake_update_ratio),
             num_warmup_steps=0,
         )
+        if self.video_params:
+            self.video_optimizer = _optimizer(self.video_params, self.parsed.video.optimizer)
+            self.video_scheduler = self._build_scheduler(self.video_optimizer)
         if is_distributed():
             device_ids = [torch.cuda.current_device()] if torch.cuda.is_available() else None
             group = get_data_parallel_group()
@@ -164,6 +239,9 @@ class FastWAMActionDmdTrainer:
         if resume_path is not None:
             current_iter = self.checkpoints.load(resume_path)
             logger.info("[resume] restored FastWAM action DMD from {} at iteration {}", resume_path, current_iter)
+        # Ensure a resumed adapter is identical on every rank as well. The
+        # action roles are synchronized by their DDP wrappers; video is not.
+        _broadcast_parameters(self.video_params)
         return current_iter
 
     def _sample_sigma(self, batch_size, device, dtype):
@@ -181,11 +259,56 @@ class FastWAMActionDmdTrainer:
     def _expand_sigma(sigma, value):
         return sigma.reshape(sigma.shape[0], *([1] * (value.ndim - 1)))
 
-    def _prepare_batch(self, sample):
+    def _capture_video_anchor(self):
+        if self.video_expert is None:
+            return {}
+        self.video_anchor_device_state = {}
+        return {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in self.video_expert.named_parameters()
+            if parameter.requires_grad
+        }
+
+    def _video_anchor_weight(self):
+        # ``getattr`` keeps lightweight legacy test/migration trainer objects
+        # usable even when they predate the optional video fields.
+        return float(getattr(self.parsed, "video_anchor_weight", 0.0))
+
+    def _video_anchor_loss(self, device):
+        if not self.video_params or self._video_anchor_weight() <= 0.0:
+            return torch.zeros((), device=device, dtype=torch.float32)
+        penalties = []
+        for name, parameter in self.video_expert.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            anchor = self.video_anchor_device_state.get(name)
+            if anchor is None:
+                cpu_anchor = self.video_anchor_state.get(name)
+                if cpu_anchor is None:
+                    continue
+                anchor = cpu_anchor.to(device=parameter.device, dtype=torch.float32)
+                self.video_anchor_device_state[name] = anchor
+            if anchor.device != parameter.device:
+                anchor = anchor.to(device=parameter.device, dtype=torch.float32)
+                self.video_anchor_device_state[name] = anchor
+            penalties.append(F.mse_loss(parameter.float(), anchor, reduction="mean"))
+        if not penalties:
+            return torch.zeros((), device=device, dtype=torch.float32)
+        return torch.stack(penalties).mean()
+
+    def _prepare_batch(self, sample, *, track_video_grad=False):
         module = self.model.unwrap_module()
-        with torch.no_grad(), self.model.autocast_context():
-            inputs = module.build_action_distill_inputs(sample)
-            condition = build_action_distill_condition(module, inputs)
+        if track_video_grad:
+            # ``build_action_distill_inputs`` keeps VAE/text/proprio encoding
+            # detached; only the video expert prefill is intentionally kept in
+            # the graph for the opt-in video role.
+            with self.model.autocast_context():
+                inputs = module.build_action_distill_inputs(sample)
+                condition = build_action_distill_condition(module, inputs, requires_grad=True)
+        else:
+            with torch.no_grad(), self.model.autocast_context():
+                inputs = module.build_action_distill_inputs(sample)
+                condition = build_action_distill_condition(module, inputs)
         valid_mask = None if inputs["action_is_pad"] is None else ~inputs["action_is_pad"]
         return inputs, condition, valid_mask
 
@@ -199,6 +322,8 @@ class FastWAMActionDmdTrainer:
             condition,
             module.train_action_scheduler.num_train_timesteps,
         )
+        video_anchor = self._video_anchor_loss(generated.device)
+        video_anchor_weight = self._video_anchor_weight()
         warmup = current_iter < self.parsed.endpoint_warmup_iters
         endpoint_weight = 1.0 if warmup else self.parsed.endpoint_loss_weight
         endpoint_loss = generated.new_zeros((), dtype=torch.float32)
@@ -213,11 +338,12 @@ class FastWAMActionDmdTrainer:
             endpoint_loss = _masked_mse(generated, teacher_action, valid_mask)
         if warmup:
             return (
-                endpoint_weight * endpoint_loss,
+                endpoint_weight * endpoint_loss + video_anchor_weight * video_anchor,
                 generated.detach(),
                 {
                     "endpoint": endpoint_loss.detach(),
                     "dmd": generated.new_zeros((), dtype=torch.float32),
+                    "video_anchor": video_anchor.detach(),
                 },
             )
 
@@ -242,8 +368,16 @@ class FastWAMActionDmdTrainer:
             norm_clip_min=self.parsed.norm_clip_min,
             mask=valid_mask,
         )
-        loss = self.parsed.dmd_loss_weight * loss_dmd + endpoint_weight * endpoint_loss
-        return loss, generated.detach(), {"endpoint": endpoint_loss.detach(), "dmd": loss_dmd.detach()}
+        loss = (
+            self.parsed.dmd_loss_weight * loss_dmd
+            + endpoint_weight * endpoint_loss
+            + video_anchor_weight * video_anchor
+        )
+        return loss, generated.detach(), {
+            "endpoint": endpoint_loss.detach(),
+            "dmd": loss_dmd.detach(),
+            "video_anchor": video_anchor.detach(),
+        }
 
     def _fake_loss(self, generated, condition, valid_mask):
         module = self.model.unwrap_module()
@@ -277,6 +411,7 @@ class FastWAMActionDmdTrainer:
             for _ in range(accumulation):
                 sample = next(samples)
                 inputs, condition, valid_mask = self._prepare_batch(sample)
+                condition = condition.detach()
                 with self.model.autocast_context():
                     generated = self._generate_with_current_student(inputs, condition)
                     fake_loss = self._fake_loss(generated, condition, valid_mask)
@@ -289,6 +424,16 @@ class FastWAMActionDmdTrainer:
             loss_total += update_loss / self.parsed.fake_update_ratio
             grad_total += float(fake_grad_norm) / self.parsed.fake_update_ratio
         return loss_total, grad_total
+
+    def _step_video_optimizer(self):
+        if self.video_optimizer is None:
+            return 0.0
+        _all_reduce_gradients(self.video_params)
+        video_grad_norm = torch.nn.utils.clip_grad_norm_(self.video_params, self.max_grad_norm)
+        self.video_optimizer.step()
+        self.video_scheduler.step()
+        self.video_optimizer.zero_grad(set_to_none=True)
+        return float(video_grad_norm)
 
     def _iter_train_samples(self):
         epoch = 0
@@ -305,7 +450,9 @@ class FastWAMActionDmdTrainer:
             return
         module = self.model.unwrap_module()
         mot_was_training = module.mot.training
+        video_was_training = module.video_expert.training
         module.mot.eval()
+        module.video_expert.eval()
         self.roles.student.eval()
         totals = {"student_teacher_l1": 0.0, "student_gt_l1": 0.0}
         count = 0
@@ -356,9 +503,8 @@ class FastWAMActionDmdTrainer:
                 step=current_iter,
             )
         self.roles.student.train()
-        if mot_was_training:
-            module.mot.train()
-            module.video_expert.eval()
+        module.mot.train(mot_was_training)
+        module.video_expert.train(video_was_training)
 
     def train(self):
         current_iter = self.setup()
@@ -369,11 +515,13 @@ class FastWAMActionDmdTrainer:
             torch.cuda.reset_peak_memory_stats()
         self.student_optimizer.zero_grad(set_to_none=True)
         self.fake_optimizer.zero_grad(set_to_none=True)
+        if self.video_optimizer is not None:
+            self.video_optimizer.zero_grad(set_to_none=True)
         samples = self._iter_train_samples()
         started_at = time.perf_counter()
 
         logger.info(
-            "[train] start method=fastwam_action_dmd iter={}/{} world_size={} mbs={} global_batch={} teacher_steps={} warmup_iters={}",
+            "[train] start method=fastwam_action_dmd iter={}/{} world_size={} mbs={} global_batch={} teacher_steps={} warmup_iters={} video_unfreeze={} video_trainable={}",
             current_iter,
             self.max_train_iters,
             get_world_size(),
@@ -381,12 +529,17 @@ class FastWAMActionDmdTrainer:
             int(self.config["data"]["train"]["batch_size"]) * get_world_size() * self.gradient_accumulation_iters,
             self.parsed.teacher_steps,
             self.parsed.endpoint_warmup_iters,
+            self.video_expert is not None,
+            sum(parameter.numel() for parameter in self.video_params),
         )
         while current_iter < self.max_train_iters:
             self.student_optimizer.zero_grad(set_to_none=True)
             for _ in range(self.gradient_accumulation_iters):
                 sample = next(samples)
-                inputs, condition, valid_mask = self._prepare_batch(sample)
+                inputs, condition, valid_mask = self._prepare_batch(
+                    sample,
+                    track_video_grad=self.video_expert is not None,
+                )
                 with self.model.autocast_context():
                     student_loss, _, student_metrics = self._student_loss(inputs, condition, valid_mask, current_iter)
                 (student_loss / self.gradient_accumulation_iters).backward()
@@ -395,6 +548,7 @@ class FastWAMActionDmdTrainer:
             self.student_optimizer.step()
             self.student_scheduler.step()
             self.student_optimizer.zero_grad(set_to_none=True)
+            video_grad_norm = self._step_video_optimizer()
 
             fake_loss = 0.0
             fake_grad_norm = 0.0
@@ -410,8 +564,13 @@ class FastWAMActionDmdTrainer:
                     "train/fake_loss": reduce_mean(float(fake_loss)),
                     "train/student_grad_norm": reduce_mean(float(student_grad_norm)),
                     "train/fake_grad_norm": reduce_mean(float(fake_grad_norm)),
+                    "train/video_anchor_loss": reduce_mean(float(student_metrics["video_anchor"].item())),
+                    "train/video_grad_norm": reduce_mean(float(video_grad_norm)),
                     "train/student_lr": self.student_scheduler.get_last_lr()[0],
                     "train/fake_lr": self.fake_scheduler.get_last_lr()[0],
+                    "train/video_lr": (
+                        self.video_scheduler.get_last_lr()[0] if self.video_scheduler is not None else 0.0
+                    ),
                     "train/iters_per_second": current_iter / elapsed,
                     "train/is_dmd_stage": int(current_iter > self.parsed.endpoint_warmup_iters),
                     "train/world_size": get_world_size(),
@@ -427,7 +586,7 @@ class FastWAMActionDmdTrainer:
                         }
                     )
                 logger.info(
-                    "[train] iter={}/{} stage={} endpoint={:.6f} dmd={:.6f} fake={:.6f} student_grad={:.4f} fake_grad={:.4f} speed={:.3f} it/s max_mem={:.2f}GiB",
+                    "[train] iter={}/{} stage={} endpoint={:.6f} dmd={:.6f} fake={:.6f} student_grad={:.4f} fake_grad={:.4f} video_grad={:.4f} speed={:.3f} it/s max_mem={:.2f}GiB",
                     current_iter,
                     self.max_train_iters,
                     "warmup" if current_iter <= self.parsed.endpoint_warmup_iters else "dmd",
@@ -436,6 +595,7 @@ class FastWAMActionDmdTrainer:
                     metrics["train/fake_loss"],
                     metrics["train/student_grad_norm"],
                     metrics["train/fake_grad_norm"],
+                    metrics["train/video_grad_norm"],
                     metrics["train/iters_per_second"],
                     metrics.get("system/gpu_max_memory_allocated_gib", 0.0),
                 )

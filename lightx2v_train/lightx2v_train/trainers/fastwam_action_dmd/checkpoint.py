@@ -37,6 +37,19 @@ def _role_state_dict(expert, train_type):
 
 def load_role_state_dict(expert, train_type, state_dict):
     if train_type == "lora":
+        # PEFT can otherwise accept a partially matching state dict and leave
+        # newly introduced adapters at their random initialization.  Compare
+        # the adapter key topology before loading so a resumed run cannot
+        # silently use a different rank/target/modules_to_save configuration.
+        expected_keys = set(get_peft_model_state_dict(expert).keys())
+        actual_keys = set(state_dict.keys())
+        missing_keys = expected_keys - actual_keys
+        unexpected_keys = actual_keys - expected_keys
+        if missing_keys or unexpected_keys:
+            raise RuntimeError(
+                "LoRA checkpoint adapter structure does not match the current role: "
+                f"missing={sorted(missing_keys)}, unexpected={sorted(unexpected_keys)}"
+            )
         incompatible = set_peft_model_state_dict(expert, state_dict)
         if incompatible and incompatible.unexpected_keys:
             raise RuntimeError(f"Unexpected LoRA checkpoint keys: {incompatible.unexpected_keys}")
@@ -79,6 +92,15 @@ class ActionDmdCheckpointManager:
                 _role_state_dict(trainer.roles.fake, trainer.parsed.fake.train_type),
                 os.path.join(save_dir, "fake_action.pt"),
             )
+            if trainer.video_expert is not None:
+                _atomic_torch_save(
+                    _role_state_dict(trainer.video_expert, trainer.parsed.video.train_type),
+                    os.path.join(save_dir, "video.pt"),
+                )
+                _atomic_torch_save(
+                    trainer.video_anchor_state,
+                    os.path.join(save_dir, "video_anchor.pt"),
+                )
             _atomic_yaml_save(
                 trainer.runtime_config,
                 os.path.join(save_dir, "config.yaml"),
@@ -95,6 +117,21 @@ class ActionDmdCheckpointManager:
                     "fake_optimizer": trainer.fake_optimizer.state_dict(),
                     "student_scheduler": trainer.student_scheduler.state_dict(),
                     "fake_scheduler": trainer.fake_scheduler.state_dict(),
+                    "video_enabled": trainer.video_expert is not None,
+                    "video_train_type": (
+                        trainer.parsed.video.train_type if trainer.video_expert is not None else None
+                    ),
+                    "video_optimizer": (
+                        trainer.video_optimizer.state_dict() if trainer.video_expert is not None else None
+                    ),
+                    "video_scheduler": (
+                        trainer.video_scheduler.state_dict() if trainer.video_expert is not None else None
+                    ),
+                    "video_anchor_weight": (
+                        float(getattr(trainer.parsed, "video_anchor_weight", 0.0))
+                        if trainer.video_expert is not None
+                        else 0.0
+                    ),
                 },
                 os.path.join(save_dir, "training_state.pt"),
             )
@@ -109,6 +146,15 @@ class ActionDmdCheckpointManager:
             raise RuntimeError("Checkpoint student train type does not match the current configuration.")
         if state["fake_train_type"] != trainer.parsed.fake.train_type:
             raise RuntimeError("Checkpoint fake train type does not match the current configuration.")
+        checkpoint_video_enabled = bool(state.get("video_enabled", False))
+        current_video_enabled = trainer.video_expert is not None
+        if checkpoint_video_enabled != current_video_enabled:
+            raise RuntimeError(
+                "Checkpoint video training mode does not match the current configuration: "
+                f"checkpoint={checkpoint_video_enabled}, current={current_video_enabled}."
+            )
+        if current_video_enabled and state.get("video_train_type") != trainer.parsed.video.train_type:
+            raise RuntimeError("Checkpoint video train type does not match the current configuration.")
         rng_path = os.path.join(checkpoint_dir, f"rng-rank-{get_rank():05d}.pt")
         if not os.path.isfile(rng_path):
             raise RuntimeError(f"Checkpoint RNG state is missing for rank {get_rank()}: {rng_path}")
@@ -122,10 +168,33 @@ class ActionDmdCheckpointManager:
             trainer.parsed.fake.train_type,
             torch.load(os.path.join(checkpoint_dir, "fake_action.pt"), map_location="cpu", weights_only=True),
         )
+        if current_video_enabled:
+            video_path = os.path.join(checkpoint_dir, "video.pt")
+            if not os.path.isfile(video_path):
+                raise RuntimeError(f"Enabled video checkpoint is missing video state: {video_path}")
+            load_role_state_dict(
+                trainer.video_expert,
+                trainer.parsed.video.train_type,
+                torch.load(video_path, map_location="cpu", weights_only=True),
+            )
+            anchor_path = os.path.join(checkpoint_dir, "video_anchor.pt")
+            if float(getattr(trainer.parsed, "video_anchor_weight", 0.0)) > 0.0 and not os.path.isfile(anchor_path):
+                raise RuntimeError(
+                    "Enabled video checkpoint with a positive video_anchor_weight is missing video anchor state: "
+                    f"{anchor_path}"
+                )
+            if os.path.isfile(anchor_path):
+                trainer.video_anchor_state = torch.load(anchor_path, map_location="cpu", weights_only=True)
+                trainer.video_anchor_device_state = {}
         trainer.student_optimizer.load_state_dict(state["student_optimizer"])
         trainer.fake_optimizer.load_state_dict(state["fake_optimizer"])
         trainer.student_scheduler.load_state_dict(state["student_scheduler"])
         trainer.fake_scheduler.load_state_dict(state["fake_scheduler"])
+        if current_video_enabled:
+            if state.get("video_optimizer") is None or state.get("video_scheduler") is None:
+                raise RuntimeError("Enabled video checkpoint is missing video optimizer/scheduler state.")
+            trainer.video_optimizer.load_state_dict(state["video_optimizer"])
+            trainer.video_scheduler.load_state_dict(state["video_scheduler"])
         rng_state = torch.load(rng_path, map_location="cpu", weights_only=True)
         torch.set_rng_state(rng_state["cpu"])
         if torch.cuda.is_available() and "cuda" in rng_state:
