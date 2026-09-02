@@ -1,19 +1,19 @@
 model:
   name: wan_fastwam
   running_dtype: bf16
-  model_path: /mnt/afs_1/charles/codes/LightX2V_fastwam/models/Wan2.2-TI2V-5B
-  checkpoint_path: /mnt/afs_1/charles/codes/LightX2V_fastwam/models/fastwam/libero_uncond_2cam224.pt
+  model_path: /mnt/miaohua/charles/models/Wan2.2-TI2V-5B
+  checkpoint_path: /mnt/miaohua/charles/models/fastwam_release/libero_uncond_2cam224.pt
 
 data:
   train: &libero_data
     name: libero_fastwam_dataset
     dataset_dirs:
-      - /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/libero_mujoco3.3.2/libero_spatial_no_noops_lerobot
-      - /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/libero_mujoco3.3.2/libero_object_no_noops_lerobot
-      - /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
-      - /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/libero_mujoco3.3.2/libero_10_no_noops_lerobot
-    pretrained_norm_stats: /mnt/afs_1/charles/codes/LightX2V_fastwam/models/fastwam/libero_uncond_2cam224_dataset_stats.json
-    text_embedding_cache_dir: /mnt/afs_1/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_libero_assets/text_embeds_cache
+      - /mnt/miaohua/charles/datasets/FastWAM-LIBERO/extracted/libero_spatial_no_noops_lerobot
+      - /mnt/miaohua/charles/datasets/FastWAM-LIBERO/extracted/libero_object_no_noops_lerobot
+      - /mnt/miaohua/charles/datasets/FastWAM-LIBERO/extracted/libero_goal_no_noops_lerobot
+      - /mnt/miaohua/charles/datasets/FastWAM-LIBERO/extracted/libero_10_no_noops_lerobot
+    pretrained_norm_stats: /mnt/miaohua/charles/models/fastwam_release/libero_uncond_2cam224_dataset_stats.json
+    text_embedding_cache_dir: null
     observation_only_video: true
     val_set_proportion: 0.01
     batch_size: 48
