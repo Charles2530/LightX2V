@@ -1,8 +1,8 @@
 model:
   name: wan_fastwam
   running_dtype: bf16
-  model_path: /mnt/afs_1/charles/models/Wan2.2-TI2V-5B
-  checkpoint_path: /mnt/afs_1/charles/models/fastwam/robotwin_uncond_3cam_384.pt
+  model_path: /mnt/miaohua/charles/models/Wan2.2-TI2V-5B
+  checkpoint_path: /mnt/miaohua/charles/models/fastwam_release/robotwin_uncond_3cam_384.pt
   proprio_dim: 14
   # Keep mixed-attention checkpointing on because the video cache is now
   # differentiable and must retain activations for the student backward pass.
@@ -22,7 +22,7 @@ data:
   train: &robotwin_data
     name: robotwin_fastwam_dataset
     dataset_dirs:
-      - /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/robotwin2.0/robotwin2.0
+      - /mnt/miaohua/charles/datasets/FastWAM-RoboTwin/robotwin2.0
     shape_meta:
       images:
         - key: cam_high
@@ -48,10 +48,9 @@ data:
     action_video_freq_ratio: 4
     observation_only_video: true
     val_set_proportion: 0.01
-    pretrained_norm_stats: /mnt/afs_1/charles/codes/LightX2V_fastwam/datasets/fastwam/robotwin2.0/dataset_stats.json
-    text_embedding_cache_dir: /mnt/afs_1/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_robotwin_assets/text_embeds_cache
-    # Per-rank micro-batch selected by the 8-GPU H100 smoke (peak 22--24 GiB
-    # in warmup/DMD stages versus 80 GiB available).
+    pretrained_norm_stats: /mnt/miaohua/charles/datasets/FastWAM-RoboTwin/dataset_stats.json
+    # Generate task prompt embeddings under this run on first launch.
+    text_embedding_cache_dir: /mnt/miaohua/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_robotwin_action_1step_dmd_lora_only-v3/text_embeds_cache
     batch_size: 8
     num_workers: 8
   val:

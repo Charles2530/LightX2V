@@ -50,7 +50,7 @@ data:
     val_set_proportion: 0.01
     pretrained_norm_stats: /mnt/miaohua/charles/datasets/FastWAM-RoboTwin/dataset_stats.json
     # Generate task prompt embeddings under this run on first launch.
-    text_embedding_cache_dir: null
+    text_embedding_cache_dir: /mnt/miaohua/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_robotwin_action_1step_dmd_lora_only-v3/text_embeds_cache
     batch_size: 16
     num_workers: 8
   val:
