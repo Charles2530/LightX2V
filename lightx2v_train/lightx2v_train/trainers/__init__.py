@@ -7,6 +7,10 @@ _LAZY_EXPORTS = {
     "DmdTrainer": (".dmd.trainer", "DmdTrainer"),
     "DopsdTrainer": (".dopsd", "DopsdTrainer"),
     "FastWAMTrainer": (".fastwam", "FastWAMTrainer"),
+    "FastWAMActionConsistencyTrainer": (
+        ".fastwam_action_consistency.trainer",
+        "FastWAMActionConsistencyTrainer",
+    ),
     "FastWAMActionDmdTrainer": (
         ".fastwam_action_dmd.trainer",
         "FastWAMActionDmdTrainer",
@@ -73,5 +77,6 @@ __all__ = [
     "VideoSgmdTrainer",
     "DopsdTrainer",
     "FastWAMTrainer",
+    "FastWAMActionConsistencyTrainer",
     "FastWAMActionDmdTrainer",
 ]
