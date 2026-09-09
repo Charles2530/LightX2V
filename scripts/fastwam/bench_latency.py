@@ -1,14 +1,19 @@
-"""Ten end-to-end latency groups using LightX2V's native FastWAM weights.
+"""Fourteen end-to-end latency groups using LightX2V's native FastWAM weights.
 
 Run from the LightX2V repository using its existing uv environment (no uv sync):
     uv run --no-project --python .venv/bin/python scripts/fastwam/bench_latency.py \
         ckpt=/absolute/path/libero_uncond_2cam224.pt \
-        +BENCH.groups=[1,2,3,4,5,6,7,8,9,10]
+        +BENCH.groups=[1,2,3,4,5,6,7,8,9,10,11,12,13,14]
 
 Groups: 1/2=10-step eager/graph,
 3/4=1-step eager/graph, 5/6=single/split-expert asynchronous graphs,
 7/8=5/6 with LightX2V kernels, 9/10=optimized SP2/TP2 with LightX2V kernels.
-Groups 9/10 correspond to groups 11/12 in the former fourteen-group benchmark.
+Groups 11-14 port FastWAM group 13's five optimizations: Q/K RMSNorm, RoPE,
+modulation/gate, all-True mask removal, and packed QKV/KV via native MMWeight.
+11=native operators, 12=custom operators, 13=the measured best hybrid_affine
+combination. These backends are fixed; VAE is executed on every request.
+Group 14 uses group 13's hybrid_affine operators but runs all Video blocks
+before all Action blocks on one stream, with VAE included in the CUDA Graph.
 Parallel scheduling is local to this
 script; the repository's FastWAM serial implementation is not changed.
 
@@ -20,12 +25,21 @@ Groups 7-10 use actual LightX2V fused QK RMSNorm, LayerNorm, scale/shift,
 RoPE and Ulysses layout kernels, not the original benchmark's Triton copies.
 They may change BF16 rounding; errors are recorded and failures are not timed.
 No FP8/INT8 quantization or per-request context-KV caching is used.
+Group 11 uses those kernels and a local BF16 gate (the repository's fused
+GEMM/gate requires MXFP8). Groups 12-14 avoid
+packed Q/K copies, use FP64 RoPE, and preserve BF16 affine/gate rounding.
+All backends retain native weights, preparation, VAE, MMWeight and attention.
 
 Overrides use OmegaConf dotlists, without Hydra output directories. Defaults:
 +BENCH.warmup=10 +BENCH.iters=100 +BENCH.graph_warmup=3
 +BENCH.output_json=/tmp/fastwam_lightx2v_latency.json
 +BENCH.use_random_context=false +BENCH.atol=0.02 +BENCH.rtol=0
 +BENCH.kernel_affine=true +BENCH.kernel_rope=true
+Use +BENCH.groups=[11,12,13] to compare the three single-GPU five-op groups.
+Use +BENCH.groups=[13,14] to compare asynchronous versus sequential execution.
+Group 13 retains native LayerNorm and MMWeight with optimized local kernels.
+Speedup uses measured group 1, or +BENCH.comparison_baseline_ms=260.883 when
+group 1 is omitted. Compared to Original FastWAM uses 299.658 ms.
 The action sigma shift defaults to 1 to match the original benchmark (the
 LightX2V policy config defaults to 5). Actions are normalized model outputs,
 before the policy's dataset denormalization or gripper postprocessing.
@@ -56,6 +70,8 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import triton
+import triton.language as tl
 from omegaconf import OmegaConf
 
 log = logging.getLogger("bench_latency")
@@ -64,8 +80,14 @@ EXECUTIONS = {
     5: "Asynchronous", 6: "Asynchronous",
     7: "Asynchronous", 8: "Asynchronous",
     9: "SP2, LightX2V optimized", 10: "TP2, LightX2V optimized",
+    11: "Asynchronous, five-op native",
+    12: "Asynchronous, five-op custom",
+    13: "Asynchronous, five-op best combination",
+    14: "Sequential, five-op best combination",
 }
-FUSED = {7, 8, 9, 10}
+FUSED = {7, 8, 9, 10, 11, 12, 13, 14}
+PARALLEL = {9, 10}
+FIVE_OP_GROUPS = {11: "native", 12: "custom", 13: "hybrid_affine", 14: "hybrid_affine"}
 
 
 def bootstrap_native_imports():
@@ -95,10 +117,14 @@ def config():
             "prompt": "pick up the object", "use_random_context": False,
             "verify": True, "atol": 0.02, "rtol": 0.0,
             "kernel_affine": True, "kernel_rope": True, "kernel_layer_norm": True,
+            "comparison_baseline_ms": 260.883, "original_fastwam_ms": 299.658,
             "output_json": "/tmp/fastwam_lightx2v_latency.json",
         },
     }
     overrides = OmegaConf.from_dotlist([arg.lstrip("+") for arg in sys.argv[1:]])
+    if any(key in overrides.get("BENCH", {}) for key in ("group11_backend", "group11_compare", "group11_rounds")):
+        raise ValueError("group11_* overrides were replaced by fixed groups: "
+                         "11=native, 12=custom, 13=best combination; use +BENCH.groups=[11,12,13]")
     cfg = OmegaConf.merge(defaults, overrides)
     unknown = set(cfg) - set(defaults)
     unknown |= set(cfg.BENCH) - set(defaults["BENCH"])
@@ -106,7 +132,9 @@ def config():
         raise ValueError(f"Unknown overrides: {sorted(unknown)}")
     b = cfg.BENCH
     if not b.groups or len(set(b.groups)) != len(b.groups) or any(i not in EXECUTIONS for i in b.groups):
-        raise ValueError("BENCH.groups must contain distinct integers in 1..10")
+        raise ValueError("BENCH.groups must contain distinct integers in 1..14")
+    if b.comparison_baseline_ms <= 0 or b.original_fastwam_ms <= 0:
+        raise ValueError("Comparison baseline latencies must be positive")
     if b.iters <= 0 or b.warmup < 0 or b.graph_warmup <= 0:
         raise ValueError("Invalid warmup/iteration counts")
     if b.height % 16 or b.width % 16 or b.action_horizon <= 0:
@@ -291,6 +319,193 @@ class Operators:
         z = self.modulate(self.norm(block.ffn.norm2, x), io[5], io[6])
         z = block.ffn.fc2.apply(torch.nn.functional.gelu(block.ffn.fc0.apply(z), approximate="tanh"))
         return x + io[7] * z
+
+
+@triton.jit
+def _paired_rms(Q, K, WQ, WK, OQ, OK, NQ: tl.constexpr, D: tl.constexpr,
+                QS: tl.constexpr, KS: tl.constexpr, EPS: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    is_q = row < NQ
+    local_row = row if is_q else row - NQ
+    x_ptr = Q if is_q else K
+    w_ptr = WQ if is_q else WK
+    y_ptr = OQ if is_q else OK
+    stride = QS if is_q else KS
+    col = tl.arange(0, BLOCK)
+    x = tl.load(x_ptr + local_row * stride + col, col < D, 0).to(tl.float32)
+    scale = tl.rsqrt(tl.sum(x * x, axis=0) / D + EPS)
+    normalized = (x * scale).to(Q.dtype.element_ty).to(tl.float32)
+    weight = tl.load(w_ptr + col, col < D, 0).to(tl.float32)
+    tl.store(y_ptr + local_row * D + col, normalized * weight, col < D)
+
+
+@triton.jit
+def _rope_fp64(X, FREQ, Y, PAIRS: tl.constexpr, D: tl.constexpr,
+               XS: tl.constexpr, HD: tl.constexpr, BLOCK: tl.constexpr):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = i < PAIRS
+    row, col = i // (D // 2), (i % (D // 2)) * 2
+    offset = row * HD + col % HD
+    real = tl.load(FREQ + offset, valid, 0).to(tl.float64)
+    imag = tl.load(FREQ + offset + 1, valid, 0).to(tl.float64)
+    x0 = tl.load(X + row * XS + col, valid, 0).to(tl.float64)
+    x1 = tl.load(X + row * XS + col + 1, valid, 0).to(tl.float64)
+    # Preserve PyTorch's double -> float -> BF16/FP16 conversion.
+    tl.store(Y + row * D + col, (x0 * real - x1 * imag).to(tl.float32), valid)
+    tl.store(Y + row * D + col + 1, (x0 * imag + x1 * real).to(tl.float32), valid)
+
+
+@triton.jit
+def _modulation(X, S, G, Y, N: tl.constexpr, D: tl.constexpr,
+                SROWS: tl.constexpr, GROWS: tl.constexpr,
+                SS: tl.constexpr, GS: tl.constexpr, BLOCK: tl.constexpr):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = i < N
+    dtype = X.dtype.element_ty
+    x = tl.load(X + i, valid, 0).to(tl.float32)
+    s = tl.load(S + (i // D % SROWS) * SS + i % D, valid, 0).to(tl.float32)
+    g = tl.load(G + (i // D % GROWS) * GS + i % D, valid, 0).to(tl.float32)
+    factor = (1.0 + g).to(dtype).to(tl.float32)
+    y = (x * factor).to(dtype).to(tl.float32) + s
+    tl.store(Y + i, y.to(dtype), valid)
+
+
+@triton.jit
+def _residual_gate(X, R, G, Y, N: tl.constexpr, D: tl.constexpr,
+                   GROWS: tl.constexpr, GS: tl.constexpr, BLOCK: tl.constexpr):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = i < N
+    dtype = X.dtype.element_ty
+    x = tl.load(X + i, valid, 0).to(tl.float32)
+    residual = tl.load(R + i, valid, 0).to(tl.float32)
+    g = tl.load(G + (i // D % GROWS) * GS + i % D, valid, 0).to(tl.float32)
+    y = x + (residual * g).to(dtype).to(tl.float32)
+    tl.store(Y + i, y.to(dtype), valid)
+
+
+class PackedProjection:
+    """Pack native [input, output] weights once; keep the original weights intact."""
+
+    def __init__(self, modules):
+        from lightx2v.common.ops.mm.mm_weight import MMWeight
+
+        if any(module.has_lora_branch for module in modules):
+            raise ValueError("Groups 11-14 require merged projection weights")
+        weights = [module._get_actual_weight().detach().t() for module in modules]
+        self.widths = tuple(weight.shape[0] for weight in weights)
+        packed_weight = torch.cat(weights).contiguous()
+        biases = [module._get_actual_bias() if module.bias is not None else None for module in modules]
+        packed_bias = None if all(b is None for b in biases) else torch.cat([
+            weight.new_zeros(width) if bias is None else bias.detach()
+            for weight, width, bias in zip(weights, self.widths, biases)])
+        self.linear = MMWeight("benchmark.packed.weight",
+                               "benchmark.packed.bias" if packed_bias is not None else None)
+        self.linear.weight, self.linear.bias = packed_weight.t(), packed_bias
+
+    def __call__(self, x):
+        return self.linear.apply(x).split(self.widths, dim=-1)
+
+
+def removable_mask(mask):
+    return mask is None or (mask.dtype == torch.bool and bool(mask.all().item()))
+
+
+class FiveOpOperators(Operators):
+    """Native kernels first, with benchmarked alternatives for small tensors."""
+
+    def __init__(self, model, bench, expert, backend):
+        super().__init__(model, bench, fused=True)
+        self.backend = backend
+        self.drop_context_mask = False
+        self.projections = {}
+        for block in getattr(model.transformer_weights, expert).blocks:
+            for attention, names in ((block.self_attn, ("q", "k", "v")),
+                                     (block.cross_attn, ("k", "v"))):
+                self.projections[id(attention)] = PackedProjection([getattr(attention, n) for n in names])
+
+    def norm(self, module, x):
+        return module.apply(x) if self.backend == "custom" else super().norm(module, x)
+
+    def modulate(self, x, shift, scale):
+        if self.backend not in ("custom", "hybrid_affine") or not self.bench.kernel_affine:
+            return super().modulate(x, shift, scale)
+        if not (x.ndim == 2 and x.is_contiguous()
+                and all(v.ndim == 2 and v.stride(-1) == 1 and v.shape[-1] == x.shape[-1]
+                        and v.shape[0] in (1, x.shape[0]) for v in (shift, scale))):
+            return x * (1 + scale) + shift
+        y = torch.empty_like(x)
+        _modulation[(triton.cdiv(x.numel(), 256),)](
+            x, shift, scale, y, x.numel(), x.shape[-1], shift.shape[0], scale.shape[0],
+            shift.stride(0), scale.stride(0), 256, enable_fp_fusion=False)
+        return y
+
+    def qk_norm(self, q, k, attention):
+        if self.backend == "native":
+            return super().qk_norm(q, k, attention)
+        if q.shape[-1] != k.shape[-1] or attention.norm_q.eps != attention.norm_k.eps:
+            raise ValueError("Paired RMSNorm requires equal widths and eps")
+        oq, ok = (torch.empty(x.shape, device=x.device, dtype=x.dtype) for x in (q, k))
+        d = q.shape[-1]
+        # Native RMSNorm copies packed views; this variant reads their row strides.
+        _paired_rms[(q.shape[0] + k.shape[0],)](
+            q, k, attention.norm_q.weight, attention.norm_k.weight, oq, ok,
+            q.shape[0], d, q.stride(0), k.stride(0), attention.norm_q.eps,
+            triton.next_power_of_2(d), enable_fp_fusion=False)
+        return oq, ok
+
+    @staticmethod
+    def rotary(x, freqs):
+        y = torch.empty(x.shape, device=x.device, dtype=x.dtype)
+        _rope_fp64[(triton.cdiv(x.numel() // 2, 256),)](
+            x, torch.view_as_real(freqs), y, x.numel() // 2, x.shape[-1],
+            x.stride(0), 128, 256, enable_fp_fusion=False)
+        return y
+
+    @staticmethod
+    def gate(x, gate, residual):
+        supported = (x.ndim == 2 and x.is_contiguous()
+                     and x.dtype in (torch.bfloat16, torch.float16)
+                     and residual.shape == x.shape and residual.is_contiguous()
+                     and gate.ndim == 2 and gate.stride(-1) == 1
+                     and gate.shape[-1] == x.shape[-1] and gate.shape[0] in (1, x.shape[0])
+                     and all(v.dtype == x.dtype and v.device == x.device for v in (gate, residual)))
+        if not supported:
+            return x + gate * residual
+        y = torch.empty_like(x)
+        _residual_gate[(triton.cdiv(x.numel(), 256),)](
+            x, residual, gate, y, x.numel(), x.shape[-1], gate.shape[0],
+            gate.stride(0), 256, enable_fp_fusion=False)
+        return y
+
+    def project(self, block, x, prepared):
+        a = block.self_attn
+        shift, scale, gate, shift_mlp, scale_mlp, gate_mlp = self.native._split_modulation(a, prepared.t_mod)
+        z = self.modulate(self.norm(a.norm1, x), shift, scale)
+        q, k, v = self.projections[id(a)](z)
+        q, k = self.qk_norm(q, k, a)
+        if self.bench.kernel_rope and self.backend != "native":
+            q, k = self.rotary(q, prepared.freqs), self.rotary(k, prepared.freqs)
+        q, k, v = [t.reshape(t.shape[0], self.heads, 128) for t in (q, k, v)]
+        if self.bench.kernel_rope and self.backend == "native":
+            cos, sin = prepared.freqs.real.reshape(-1, 64), prepared.freqs.imag.reshape(-1, 64)
+            q = self.rope_kernel(q, cos, sin, interleaved=True)
+            k = self.rope_kernel(k, cos, sin, interleaved=True)
+        elif not self.bench.kernel_rope:
+            q, k = a.rope.apply(q, k, prepared.freqs)
+        return q, k, v, x, gate, shift_mlp, scale_mlp, gate_mlp
+
+    def post(self, block, io, mixed, prepared):
+        x = self.gate(io[3], io[4], block.self_attn.o.apply(mixed))
+        a = block.cross_attn
+        q = a.q.apply(self.norm(a.norm3, x))
+        k, v = self.projections[id(a)](prepared.context)
+        q, k = self.qk_norm(q, k, a)
+        q, k, v = [t.reshape(t.shape[0], 24, 128) for t in (q, k, v)]
+        mask = None if self.drop_context_mask else prepared.context_mask
+        x = x + a.o.apply(a.attn.apply(q, k, v, attn_mask=mask))
+        z = self.modulate(self.norm(block.ffn.norm2, x), io[5], io[6])
+        z = block.ffn.fc2.apply(torch.nn.functional.gelu(block.ffn.fc0.apply(z), approximate="tanh"))
+        return self.gate(x, io[7], z)
 
 
 class ActionRunner:
@@ -528,6 +743,55 @@ class ActionRunner:
         return output
 
 
+class FiveOpActionRunner(ActionRunner):
+    def __init__(self, *args, backend, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.group not in FIVE_OP_GROUPS or len(self.devices) != 1 or self.rank is not None:
+            raise ValueError("Groups 11-14 require one GPU without distributed workers")
+        if backend != FIVE_OP_GROUPS[self.group]:
+            raise ValueError(f"Group {self.group} requires backend={FIVE_OP_GROUPS[self.group]}")
+        self.backend = backend
+        self.video_ops = FiveOpOperators(self.model, self.bench, "video", backend)
+        self.action_ops = FiveOpOperators(self.model, self.bench, "action", backend)
+        video, context, mask, attention = self.prepare_video()
+        timesteps, _ = self.schedule()
+        action = self.prepare_action(self.noise, timesteps[0], context, mask, attention)
+        self.drop_masks = {}
+        for expert, prepared, ops in (("video", video, self.video_ops), ("action", action, self.action_ops)):
+            self.drop_masks[expert] = (removable_mask(prepared.attention), removable_mask(prepared.context_mask))
+            ops.drop_context_mask = self.drop_masks[expert][1]
+        if self.group == 14:
+            self.run_gpu = self.sequential
+        sync(self.devices)
+
+    def finish(self, expert, index, io, prepared, kv=None):
+        k, v = io[1:3] if kv is None else (
+            torch.cat((kv[0], io[1]), dim=0), torch.cat((kv[1], io[2]), dim=0))
+        block = self.block(expert, index)
+        mask = None if self.drop_masks[expert][0] else prepared.attention
+        mixed = block.self_attn.attn.apply(io[0], k, v, attn_mask=mask)
+        return (self.video_ops if expert == "video" else self.action_ops).post(block, io, mixed, prepared)
+
+    def sequential(self):
+        video, context, mask, attention = self.prepare_video()
+        vx, cache = video.tokens, []
+        # Use the fused project/finish methods rather than native serial MoT.
+        for index in range(self.model.transformer_infer.num_layers):
+            io = self.project("video", index, vx, video)
+            cache.append(io[1:3])
+            vx = self.finish("video", index, io, video)
+        timesteps, deltas = self.schedule()
+        x = self.noise
+        for timestep, delta in zip(timesteps, deltas):
+            action = self.prepare_action(x, timestep, context, mask, attention)
+            ax = action.tokens
+            for index, kv in enumerate(cache):
+                io = self.project("action", index, ax, action)
+                ax = self.finish("action", index, io, action, kv)
+            x = self.post_step(ax, delta, x)
+        return x[0].float()
+
+
 def shard_tp(model, rank, comms):
     from lightx2v.common.ops.mm.mm_weight import MMWeightTP
     for name in ("video", "action"):
@@ -618,7 +882,10 @@ def run_groups(cfg, groups, model, vae, cases, context, mask, rank=None, comms=N
     order = [i for i in groups if i != 10] + [i for i in groups if i == 10]
     tp_ready = False
     for group in order:
+        backend = FIVE_OP_GROUPS.get(group)
         log.info("Setting up group %d: %s", group, EXECUTIONS[group])
+        if backend is not None:
+            log.info("Group %d backend=%s", group, backend)
         if group == 10 and not tp_ready:
             shard_tp(model, rank, comms)
             tp_ready = True
@@ -628,12 +895,14 @@ def run_groups(cfg, groups, model, vae, cases, context, mask, rank=None, comms=N
             move_weights(model.transformer_weights.action, action_device)
             move_weights(model.transformer_weights.action_head, action_device)
             model.pre_infer.action_freqs = model.pre_infer.action_freqs.to(action_device)
-        runner = ActionRunner(model, vae, context, mask, cases[0], b, group, rank, comms)
+        runner_type = FiveOpActionRunner if backend is not None else ActionRunner
+        kwargs = {"backend": backend} if backend is not None else {}
+        runner = runner_type(model, vae, context, mask, cases[0], b, group, rank, comms, **kwargs)
         result = {"group": group, "execution": EXECUTIONS[group], "action_steps": runner.steps,
                   "cuda_graph": group not in (1, 3), "fusion": group in FUSED,
-                  "gpu_count": 2 if group in (6, 8) or group >= 9 else 1,
+                  "gpu_count": 2 if group in (6, 8) or group in PARALLEL else 1,
                   "operator_backend": "lightx2v_kernels" if group in FUSED else "lightx2v_torch",
-                  "status": "pending"}
+                  "vae_included": True, "status": "pending"}
         result["kernels"] = ([
             "lightx2v.fused_qk_rms_norm" if not runner.tp else "packed_tp_fp32_rms_reduction",
             "lightx2v.norm_infer" if b.kernel_layer_norm else "torch.layer_norm",
@@ -642,6 +911,24 @@ def run_groups(cfg, groups, model, vae, cases, context, mask, rank=None, comms=N
         ] if group in FUSED else ["lightx2v_native_torch_operators"])
         if runner.sp:
             result["kernels"].append("lightx2v.TritonUlyssesPrePost")
+        if backend is not None:
+            result["kernels"].extend(["lightx2v.MMWeight_packed_qkv_cross_kv",
+                                      "local_bf16_residual_gate", "static_all_true_mask_removal"])
+            result.update(operator_backend="lightx2v_kernels_with_bf16_gate_fallback",
+                          backend=backend,
+                          pipeline=group != 14, local_compute_streams=1 if group == 14 else 2,
+                          execution_order="all_video_then_all_action" if group == 14 else "layerwise_asynchronous",
+                          attention_masks_removed=runner.drop_masks,
+                          linear_calls_per_forward=420, rmsnorm_operations_per_forward=240)
+            if backend != "native":
+                result["operator_backend"] = "lightx2v_with_benchmarked_triton_fallbacks"
+                result["kernels"][0] = "local_strided_paired_qk_rmsnorm"
+                if b.kernel_rope:
+                    result["kernels"][3] = "local_rope_fp64"
+            if backend == "custom":
+                result["kernels"][1] = "torch.layer_norm"
+            if backend in ("custom", "hybrid_affine") and b.kernel_affine:
+                result["kernels"][2] = "local_bf16_modulation"
         result["collectives_per_rank_per_request"] = {9: 121, 10: 300}.get(group, 0)
         try:
             start = time.perf_counter()
@@ -683,7 +970,7 @@ def worker(rank, raw_cfg, rendezvous, output):
         comms = {name: dist.new_group([0, 1], backend="nccl") for name in ("video", "action")}
         model, vae = load_model(cfg, device)
         cases, context, mask, encoder = inputs(cfg, device)
-        results = run_groups(cfg, [i for i in cfg.BENCH.groups if i >= 9], model, vae,
+        results = run_groups(cfg, [i for i in cfg.BENCH.groups if i in PARALLEL], model, vae,
                              cases, context, mask, rank, comms)
         if rank == 0:
             Path(output).write_text(json.dumps(results))
@@ -708,7 +995,7 @@ def main():
     if device.type != "cuda" or device.index is None:
         raise ValueError("BENCH.device must be cuda:N")
     torch.cuda.set_device(device)
-    dual = any(i in (6, 8) or i >= 9 for i in b.groups)
+    dual = any(i in (6, 8) or i in PARALLEL for i in b.groups)
     other = torch.device(b.action_device)
     if dual and (other.type != "cuda" or other.index is None or other == device or other.index >= torch.cuda.device_count()):
         raise ValueError("BENCH.action_device must be a different available CUDA device")
@@ -726,7 +1013,7 @@ def main():
               "excluded": ["text_encoding", "model_load", "graph_setup", "validation", "timing_barrier_and_reduction"],
               "baseline_difference": "eager uses LightX2V serial operators, not FastWAM model.infer_action per-call module traversal",
               "results": []}
-    local_groups = [i for i in b.groups if i <= 8]
+    local_groups = [i for i in b.groups if i not in PARALLEL]
     if local_groups:
         model, vae = load_model(cfg, device)
         cases, context, mask, encoder = inputs(cfg, device)
@@ -738,23 +1025,30 @@ def main():
         for d in ([device, other] if dual else [device]):
             with torch.cuda.device(d):
                 torch.cuda.empty_cache()
-    if any(i >= 9 for i in b.groups):
+    if any(i in PARALLEL for i in b.groups):
         with tempfile.TemporaryDirectory(prefix="lightx2v_fastwam_") as temp:
             output = str(Path(temp) / "parallel.json")
             mp.spawn(worker, args=(OmegaConf.to_container(cfg, resolve=True),
                                    "file://" + str(Path(temp) / "rendezvous"), output), nprocs=2, join=True)
             report["results"].extend(json.loads(Path(output).read_text()))
     report["results"].sort(key=lambda item: item["group"])
-    write_report(report, cfg)
     baseline = next((r["summary"]["mean_ms"] for r in report["results"] if r["group"] == 1 and "summary" in r), None)
-    print("\n| Group | Action Steps | Compile (incl. VAE) | GPU Count | Execution | Fusion | Mean Latency | Speedup |")
-    print("|---|---|---|---|---|---|---|---|")
+    report["speedup_baseline_source"] = "measured_group_1" if baseline is not None else "configured_historical_baseline"
+    baseline = baseline if baseline is not None else float(b.comparison_baseline_ms)
+    report["speedup_baseline_ms"] = baseline
+    report["original_fastwam_baseline_ms"] = float(b.original_fastwam_ms)
+    print("\n| Group | Action Steps | Compile (incl. VAE) | GPU Count | Execution | Fusion | Mean Latency | Speedup | Compared to Original FastWAM |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for r in report["results"]:
         mean = r.get("summary", {}).get("mean_ms")
         latency = f"{mean:.3f} ms" if mean is not None else r["status"]
         speedup = f"{baseline / mean:.2f}x" if baseline and mean else "-"
+        original = f"{b.original_fastwam_ms / mean:.2f}x" if mean else "-"
+        if mean is not None:
+            r.update(speedup=baseline / mean, compared_to_original_fastwam=b.original_fastwam_ms / mean)
         print(f"| {r['group']} | {r['action_steps']} | {'CUDA Graph' if r['cuda_graph'] else 'None'} | "
-              f"{r['gpu_count']} | {r['execution']} | {'Yes' if r['fusion'] else 'No'} | {latency} | {speedup} |")
+              f"{r['gpu_count']} | {r['execution']} | {'Yes' if r['fusion'] else 'No'} | {latency} | {speedup} | {original} |")
+    write_report(report, cfg)
     print(f"Saved: {b.output_json}")
     if any(r["status"] == "validation_failed" for r in report["results"]):
         raise SystemExit(2)

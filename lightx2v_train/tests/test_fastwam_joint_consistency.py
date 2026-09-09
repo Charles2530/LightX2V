@@ -122,7 +122,7 @@ def test_config_and_registration(tmp_path):
     parsed = FastWAMJointConsistencyConfig.from_mapping(config)
     assert parsed.train_video is True
     assert parsed.student.lora["rank"] == 128
-    assert parsed.target_steps == 2
+    assert parsed.target_steps == 10
     assert parsed.consistency_loss_weight == 1.0
     assert parsed.flow_loss_weight == 0.2
     config["logging"]["wandb"]["enable"] = False
