@@ -31,6 +31,7 @@ from lightx2v_train.utils.registry import TRAINER_REGISTER
 
 from .checkpoint import ActionDmdCheckpointManager
 from .config import FastWAMActionDmdConfig
+from .lora_monitor import LoraChangeMonitor, LoraMonitorConfig
 from .roles import ActionDmdRoles, attach_video_role
 
 
@@ -126,6 +127,9 @@ class FastWAMActionDmdTrainer:
         self.training_config = config["training"]
         self.inference_config = config.get("inference", {})
         self.logging_config = config.get("logging", {})
+        self.lora_monitor_config = LoraMonitorConfig.from_mapping(self.logging_config.get("lora_monitor"))
+        self.lora_monitor = None
+        self._lora_monitor_step = 0
         self.parsed = FastWAMActionDmdConfig.from_mapping(config)
         self.output_dir = self.training_config["output_dir"]
         self.max_train_iters = int(self.training_config["max_train_iters"])
@@ -242,6 +246,13 @@ class FastWAMActionDmdTrainer:
         # Ensure a resumed adapter is identical on every rank as well. The
         # action roles are synchronized by their DDP wrappers; video is not.
         _broadcast_parameters(self.video_params)
+        if self.lora_monitor_config.enabled and is_main_process():
+            self.lora_monitor = LoraChangeMonitor(
+                self.lora_monitor_config,
+                {"action": self.roles.student, "video": self.video_expert},
+                self.output_dir,
+                initial_step=current_iter,
+            )
         return current_iter
 
     def _sample_sigma(self, batch_size, device, dtype):
@@ -429,6 +440,8 @@ class FastWAMActionDmdTrainer:
         if self.video_optimizer is None:
             return 0.0
         _all_reduce_gradients(self.video_params)
+        if getattr(self, "lora_monitor", None) is not None:
+            self.lora_monitor.capture_gradients("video", self._lora_monitor_step)
         video_grad_norm = torch.nn.utils.clip_grad_norm_(self.video_params, self.max_grad_norm)
         self.video_optimizer.step()
         self.video_scheduler.step()
@@ -544,6 +557,9 @@ class FastWAMActionDmdTrainer:
                     student_loss, _, student_metrics = self._student_loss(inputs, condition, valid_mask, current_iter)
                 (student_loss / self.gradient_accumulation_iters).backward()
 
+            self._lora_monitor_step = current_iter + 1
+            if self.lora_monitor is not None:
+                self.lora_monitor.capture_gradients("action", self._lora_monitor_step)
             student_grad_norm = torch.nn.utils.clip_grad_norm_(self.student_params, self.max_grad_norm)
             self.student_optimizer.step()
             self.student_scheduler.step()
@@ -556,6 +572,7 @@ class FastWAMActionDmdTrainer:
                 fake_loss, fake_grad_norm = self._train_fake_updates(samples)
 
             current_iter += 1
+            lora_metrics = self.lora_monitor.record(current_iter) if self.lora_monitor is not None else {}
             if current_iter == 1 or current_iter % self.log_every_iters == 0:
                 elapsed = max(time.perf_counter() - started_at, 1e-6)
                 metrics = {
@@ -599,7 +616,9 @@ class FastWAMActionDmdTrainer:
                     metrics["train/iters_per_second"],
                     metrics.get("system/gpu_max_memory_allocated_gib", 0.0),
                 )
-                self.monitor.log_metrics(metrics, step=current_iter)
+                self.monitor.log_metrics({**metrics, **lora_metrics}, step=current_iter)
+            elif lora_metrics:
+                self.monitor.log_metrics(lora_metrics, step=current_iter)
             if self.eval_every_iters and current_iter % self.eval_every_iters == 0:
                 self.evaluate(current_iter)
             if self.save_every_iters and current_iter % self.save_every_iters == 0:

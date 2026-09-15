@@ -143,6 +143,13 @@ inference:
 
 logging:
   train_log_every_iters: 10
+  lora_monitor:
+    enabled: true
+    every_n_steps: 50
+    reversal_cos_threshold: -0.2
+    zero_tolerance: 1.0e-12
+    save_snapshots: true
+    keep_last_snapshots: 2
   wandb:
     enable: true
     project: fastwam-action-dmd

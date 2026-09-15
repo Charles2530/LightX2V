@@ -1,0 +1,143 @@
+{
+  "updated_at": "2026-09-10T20:48:26+00:00",
+  "pid": 682873,
+  "training_step": 4000,
+  "monitor_step": 4000,
+  "log_age_seconds": 57.046801805496216,
+  "alerts": [
+    "诊断 step 3500→4000：teacher L1 上升 11.0%，GT L1 上升 15.2%。两项均超过 10% 的观察阈值；小样本诊断不能替代闭环评测。",
+    "WandB 复用旧 run，已确认丢弃指标：最新警告 step 4000 < 30001。本报告使用本地 CSV/log。",
+    "输出目录仍混有高步数旧 checkpoint：checkpoint-000028000, checkpoint-000030000。现有 save_total_limit=3 在保存前按步数裁剪，会混合处理两轮 checkpoint；auto-resume 也可能选中旧轮次。",
+    "action 最近 5 个记录点中至少 3 次明显反转比例 ≥10%，需要结合损失/评测持续观察；这是筛查阈值，不是 loss 冲突证明。"
+  ],
+  "latest": {
+    "action": {
+      "step": "4000",
+      "branch": "action",
+      "layer_count": "300",
+      "has_lora": "1",
+      "trainable_layer_count": "300",
+      "valid_direction_count": "300",
+      "negative_direction_fraction": "0.5633333333333334",
+      "reversal_fraction": "0.13666666666666666",
+      "unchanged_fraction": "0.0",
+      "missing_gradient_fraction": "0.0",
+      "zero_gradient_fraction": "0.0",
+      "nonfinite_weight_layer_count": "0",
+      "nonfinite_gradient_layer_count": "0",
+      "delta_w_norm_mean": "1.5847876764058961",
+      "delta_w_norm_median": "1.0267827237146117",
+      "delta_w_norm_max": "10.520985006313044",
+      "delta_w_norm_count": "300",
+      "relative_delta_w_norm_mean": "0.0299005172003839",
+      "relative_delta_w_norm_median": "0.01989016408894346",
+      "relative_delta_w_norm_max": "0.17463364207086385",
+      "relative_delta_w_norm_count": "300",
+      "interval_update_norm_mean": "0.24555421237360908",
+      "interval_update_norm_median": "0.17483607644044835",
+      "interval_update_norm_max": "1.3271795454646653",
+      "interval_update_norm_count": "300",
+      "relative_interval_update_norm_mean": "0.0046969062188749475",
+      "relative_interval_update_norm_median": "0.0036769176159047135",
+      "relative_interval_update_norm_max": "0.022029324969798553",
+      "relative_interval_update_norm_count": "300",
+      "update_cosine_mean": "-0.03489791456774418",
+      "update_cosine_median": "-0.022628671076050124",
+      "update_cosine_max": "0.6057340443463533",
+      "update_cosine_count": "300",
+      "gradient_norm_mean": "0.0002738991061175628",
+      "gradient_norm_median": "0.00011714495256536471",
+      "gradient_norm_max": "0.0033009517628288625",
+      "gradient_norm_count": "300",
+      "reversal_fraction_so_far_mean": "0.1229535864978903",
+      "reversal_fraction_so_far_median": "0.06329113924050633",
+      "reversal_fraction_so_far_max": "0.9620253164556962",
+      "reversal_fraction_so_far_count": "300"
+    },
+    "video": {
+      "step": "4000",
+      "branch": "video",
+      "layer_count": "300",
+      "has_lora": "1",
+      "trainable_layer_count": "300",
+      "valid_direction_count": "292",
+      "negative_direction_fraction": "0.1917808219178082",
+      "reversal_fraction": "0.003424657534246575",
+      "unchanged_fraction": "0.02666666666666667",
+      "missing_gradient_fraction": "0.0",
+      "zero_gradient_fraction": "0.02666666666666667",
+      "nonfinite_weight_layer_count": "0",
+      "nonfinite_gradient_layer_count": "0",
+      "delta_w_norm_mean": "0.8651504838601467",
+      "delta_w_norm_median": "0.7240422839071146",
+      "delta_w_norm_max": "2.032261410593049",
+      "delta_w_norm_count": "300",
+      "relative_delta_w_norm_mean": "0.00966778487768816",
+      "relative_delta_w_norm_median": "0.009165600827880892",
+      "relative_delta_w_norm_max": "0.017327987109577624",
+      "relative_delta_w_norm_count": "300",
+      "interval_update_norm_mean": "0.0786701592675653",
+      "interval_update_norm_median": "0.06711959463331163",
+      "interval_update_norm_max": "0.16046902451800887",
+      "interval_update_norm_count": "300",
+      "relative_interval_update_norm_mean": "0.0008702441635006355",
+      "relative_interval_update_norm_median": "0.0008608237078416944",
+      "relative_interval_update_norm_max": "0.001330441076400733",
+      "relative_interval_update_norm_count": "300",
+      "update_cosine_mean": "0.05068564444513441",
+      "update_cosine_median": "0.05994229747710815",
+      "update_cosine_max": "0.19561848209193955",
+      "update_cosine_count": "292",
+      "gradient_norm_mean": "0.0015506943984627626",
+      "gradient_norm_median": "0.000848616922073562",
+      "gradient_norm_max": "0.006132947902881457",
+      "gradient_norm_count": "300",
+      "reversal_fraction_so_far_mean": "0.002861106294433848",
+      "reversal_fraction_so_far_median": "0.0",
+      "reversal_fraction_so_far_max": "0.12658227848101267",
+      "reversal_fraction_so_far_count": "292"
+    }
+  },
+  "evaluations": [
+    {
+      "step": 500.0,
+      "student_teacher_l1": 0.010371,
+      "student_gt_l1": 0.014475
+    },
+    {
+      "step": 1000.0,
+      "student_teacher_l1": 0.010956,
+      "student_gt_l1": 0.015015
+    },
+    {
+      "step": 1500.0,
+      "student_teacher_l1": 0.011566,
+      "student_gt_l1": 0.014636
+    },
+    {
+      "step": 2000.0,
+      "student_teacher_l1": 0.012929,
+      "student_gt_l1": 0.01655
+    },
+    {
+      "step": 2500.0,
+      "student_teacher_l1": 0.010454,
+      "student_gt_l1": 0.014073
+    },
+    {
+      "step": 3000.0,
+      "student_teacher_l1": 0.011492,
+      "student_gt_l1": 0.013338
+    },
+    {
+      "step": 3500.0,
+      "student_teacher_l1": 0.013632,
+      "student_gt_l1": 0.015668
+    },
+    {
+      "step": 4000.0,
+      "student_teacher_l1": 0.015126,
+      "student_gt_l1": 0.018057
+    }
+  ]
+}

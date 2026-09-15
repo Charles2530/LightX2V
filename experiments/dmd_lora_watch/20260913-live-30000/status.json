@@ -1,0 +1,401 @@
+{
+  "updated_at": "2026-09-13T19:21:33+00:00",
+  "pid": 726272,
+  "training_step": 30000,
+  "monitor_step": 30000,
+  "log_age_seconds": 42.221434593200684,
+  "alerts": [
+    "GT L1 从 step 28500 到 30000 连续三次升高；需要扩大验证样本并核对闭环表现，不能由此单独归因于 video LoRA。",
+    "WandB 复用旧 run，已确认丢弃指标：最新警告 step 30000 < 30001。本报告使用本地 CSV/log。"
+  ],
+  "latest": {
+    "action": {
+      "step": "30000",
+      "branch": "action",
+      "layer_count": "300",
+      "has_lora": "1",
+      "trainable_layer_count": "300",
+      "valid_direction_count": "300",
+      "negative_direction_fraction": "0.03666666666666667",
+      "reversal_fraction": "0.0033333333333333335",
+      "unchanged_fraction": "0.0",
+      "missing_gradient_fraction": "0.0",
+      "zero_gradient_fraction": "0.0",
+      "nonfinite_weight_layer_count": "0",
+      "nonfinite_gradient_layer_count": "0",
+      "delta_w_norm_mean": "3.2549726964083514",
+      "delta_w_norm_median": "2.313089834534868",
+      "delta_w_norm_max": "22.064067420928698",
+      "delta_w_norm_count": "300",
+      "relative_delta_w_norm_mean": "0.06192387020208219",
+      "relative_delta_w_norm_median": "0.04395266749359315",
+      "relative_delta_w_norm_max": "0.36623267215967203",
+      "relative_delta_w_norm_count": "300",
+      "interval_update_norm_mean": "4.5413482980063656e-07",
+      "interval_update_norm_median": "4.0370962704590885e-07",
+      "interval_update_norm_max": "2.0782707768134764e-06",
+      "interval_update_norm_count": "300",
+      "relative_interval_update_norm_mean": "8.88837792091005e-09",
+      "relative_interval_update_norm_median": "8.37222676440355e-09",
+      "relative_interval_update_norm_max": "3.360684263905984e-08",
+      "relative_interval_update_norm_count": "300",
+      "update_cosine_mean": "0.18881528687668092",
+      "update_cosine_median": "0.18806392370065905",
+      "update_cosine_max": "0.5886319763069852",
+      "update_cosine_count": "300",
+      "gradient_norm_mean": "8.793109978489963e-05",
+      "gradient_norm_median": "4.681161881939553e-05",
+      "gradient_norm_max": "0.0005999368046024723",
+      "gradient_norm_count": "300",
+      "reversal_fraction_so_far_mean": "0.08922092376182526",
+      "reversal_fraction_so_far_median": "0.05342237061769616",
+      "reversal_fraction_so_far_max": "0.6878130217028381",
+      "reversal_fraction_so_far_count": "300"
+    },
+    "video": {
+      "step": "30000",
+      "branch": "video",
+      "layer_count": "300",
+      "has_lora": "1",
+      "trainable_layer_count": "300",
+      "valid_direction_count": "292",
+      "negative_direction_fraction": "0.003424657534246575",
+      "reversal_fraction": "0.0",
+      "unchanged_fraction": "0.02666666666666667",
+      "missing_gradient_fraction": "0.0",
+      "zero_gradient_fraction": "0.02666666666666667",
+      "nonfinite_weight_layer_count": "0",
+      "nonfinite_gradient_layer_count": "0",
+      "delta_w_norm_mean": "1.633233121557114",
+      "delta_w_norm_median": "1.3544601092182387",
+      "delta_w_norm_max": "4.22138979651213",
+      "delta_w_norm_count": "300",
+      "relative_delta_w_norm_mean": "0.01839550420609107",
+      "relative_delta_w_norm_median": "0.01687515794430907",
+      "relative_delta_w_norm_max": "0.03756616143589192",
+      "relative_delta_w_norm_count": "300",
+      "interval_update_norm_mean": "1.1583311918083645e-07",
+      "interval_update_norm_median": "9.964569706959353e-08",
+      "interval_update_norm_max": "3.2265678794227545e-07",
+      "interval_update_norm_count": "300",
+      "relative_interval_update_norm_mean": "1.2659282166913538e-09",
+      "relative_interval_update_norm_median": "1.2671373894064888e-09",
+      "relative_interval_update_norm_max": "2.5802123152038394e-09",
+      "relative_interval_update_norm_count": "300",
+      "update_cosine_mean": "0.12276384800519324",
+      "update_cosine_median": "0.11494936494576112",
+      "update_cosine_max": "0.32936379866854154",
+      "update_cosine_count": "292",
+      "gradient_norm_mean": "0.00024922786394108727",
+      "gradient_norm_median": "0.00016844445985317498",
+      "gradient_norm_max": "0.0011063107921201604",
+      "gradient_norm_count": "300",
+      "reversal_fraction_so_far_mean": "0.0039049100098337416",
+      "reversal_fraction_so_far_median": "0.0",
+      "reversal_fraction_so_far_max": "0.1652754590984975",
+      "reversal_fraction_so_far_count": "292"
+    }
+  },
+  "evaluations": [
+    {
+      "step": 500.0,
+      "student_teacher_l1": 0.010371,
+      "student_gt_l1": 0.014475
+    },
+    {
+      "step": 1000.0,
+      "student_teacher_l1": 0.010956,
+      "student_gt_l1": 0.015015
+    },
+    {
+      "step": 1500.0,
+      "student_teacher_l1": 0.011566,
+      "student_gt_l1": 0.014636
+    },
+    {
+      "step": 2000.0,
+      "student_teacher_l1": 0.012929,
+      "student_gt_l1": 0.01655
+    },
+    {
+      "step": 2500.0,
+      "student_teacher_l1": 0.010454,
+      "student_gt_l1": 0.014073
+    },
+    {
+      "step": 3000.0,
+      "student_teacher_l1": 0.011492,
+      "student_gt_l1": 0.013338
+    },
+    {
+      "step": 3500.0,
+      "student_teacher_l1": 0.013632,
+      "student_gt_l1": 0.015668
+    },
+    {
+      "step": 4000.0,
+      "student_teacher_l1": 0.015126,
+      "student_gt_l1": 0.018057
+    },
+    {
+      "step": 4500.0,
+      "student_teacher_l1": 0.012709,
+      "student_gt_l1": 0.014466
+    },
+    {
+      "step": 5000.0,
+      "student_teacher_l1": 0.01067,
+      "student_gt_l1": 0.013546
+    },
+    {
+      "step": 5500.0,
+      "student_teacher_l1": 0.011318,
+      "student_gt_l1": 0.013755
+    },
+    {
+      "step": 6000.0,
+      "student_teacher_l1": 0.011902,
+      "student_gt_l1": 0.014381
+    },
+    {
+      "step": 6500.0,
+      "student_teacher_l1": 0.011269,
+      "student_gt_l1": 0.014494
+    },
+    {
+      "step": 7000.0,
+      "student_teacher_l1": 0.010902,
+      "student_gt_l1": 0.013994
+    },
+    {
+      "step": 7500.0,
+      "student_teacher_l1": 0.015398,
+      "student_gt_l1": 0.018614
+    },
+    {
+      "step": 8000.0,
+      "student_teacher_l1": 0.012318,
+      "student_gt_l1": 0.015173
+    },
+    {
+      "step": 8500.0,
+      "student_teacher_l1": 0.01424,
+      "student_gt_l1": 0.017604
+    },
+    {
+      "step": 9000.0,
+      "student_teacher_l1": 0.011297,
+      "student_gt_l1": 0.013818
+    },
+    {
+      "step": 9500.0,
+      "student_teacher_l1": 0.010351,
+      "student_gt_l1": 0.013343
+    },
+    {
+      "step": 10000.0,
+      "student_teacher_l1": 0.010669,
+      "student_gt_l1": 0.012507
+    },
+    {
+      "step": 10500.0,
+      "student_teacher_l1": 0.012007,
+      "student_gt_l1": 0.013624
+    },
+    {
+      "step": 11000.0,
+      "student_teacher_l1": 0.012755,
+      "student_gt_l1": 0.014121
+    },
+    {
+      "step": 11500.0,
+      "student_teacher_l1": 0.010225,
+      "student_gt_l1": 0.013013
+    },
+    {
+      "step": 12000.0,
+      "student_teacher_l1": 0.012053,
+      "student_gt_l1": 0.013534
+    },
+    {
+      "step": 12500.0,
+      "student_teacher_l1": 0.012059,
+      "student_gt_l1": 0.013311
+    },
+    {
+      "step": 13000.0,
+      "student_teacher_l1": 0.010642,
+      "student_gt_l1": 0.01264
+    },
+    {
+      "step": 13500.0,
+      "student_teacher_l1": 0.013428,
+      "student_gt_l1": 0.014634
+    },
+    {
+      "step": 14000.0,
+      "student_teacher_l1": 0.013759,
+      "student_gt_l1": 0.014587
+    },
+    {
+      "step": 14500.0,
+      "student_teacher_l1": 0.014705,
+      "student_gt_l1": 0.014831
+    },
+    {
+      "step": 15000.0,
+      "student_teacher_l1": 0.014319,
+      "student_gt_l1": 0.014792
+    },
+    {
+      "step": 15500.0,
+      "student_teacher_l1": 0.013586,
+      "student_gt_l1": 0.013834
+    },
+    {
+      "step": 16000.0,
+      "student_teacher_l1": 0.01467,
+      "student_gt_l1": 0.015206
+    },
+    {
+      "step": 16500.0,
+      "student_teacher_l1": 0.014042,
+      "student_gt_l1": 0.014542
+    },
+    {
+      "step": 17000.0,
+      "student_teacher_l1": 0.014118,
+      "student_gt_l1": 0.014142
+    },
+    {
+      "step": 17500.0,
+      "student_teacher_l1": 0.015062,
+      "student_gt_l1": 0.015197
+    },
+    {
+      "step": 18000.0,
+      "student_teacher_l1": 0.015801,
+      "student_gt_l1": 0.015921
+    },
+    {
+      "step": 18500.0,
+      "student_teacher_l1": 0.01656,
+      "student_gt_l1": 0.017139
+    },
+    {
+      "step": 19000.0,
+      "student_teacher_l1": 0.012971,
+      "student_gt_l1": 0.014022
+    },
+    {
+      "step": 19500.0,
+      "student_teacher_l1": 0.014446,
+      "student_gt_l1": 0.014935
+    },
+    {
+      "step": 20000.0,
+      "student_teacher_l1": 0.013081,
+      "student_gt_l1": 0.013631
+    },
+    {
+      "step": 20500.0,
+      "student_teacher_l1": 0.01297,
+      "student_gt_l1": 0.013339
+    },
+    {
+      "step": 21000.0,
+      "student_teacher_l1": 0.011666,
+      "student_gt_l1": 0.012432
+    },
+    {
+      "step": 21500.0,
+      "student_teacher_l1": 0.013404,
+      "student_gt_l1": 0.013638
+    },
+    {
+      "step": 22000.0,
+      "student_teacher_l1": 0.013164,
+      "student_gt_l1": 0.013616
+    },
+    {
+      "step": 22500.0,
+      "student_teacher_l1": 0.012761,
+      "student_gt_l1": 0.013408
+    },
+    {
+      "step": 23000.0,
+      "student_teacher_l1": 0.011652,
+      "student_gt_l1": 0.012745
+    },
+    {
+      "step": 23500.0,
+      "student_teacher_l1": 0.01235,
+      "student_gt_l1": 0.013872
+    },
+    {
+      "step": 24000.0,
+      "student_teacher_l1": 0.011982,
+      "student_gt_l1": 0.013266
+    },
+    {
+      "step": 24500.0,
+      "student_teacher_l1": 0.012108,
+      "student_gt_l1": 0.013049
+    },
+    {
+      "step": 25000.0,
+      "student_teacher_l1": 0.012402,
+      "student_gt_l1": 0.01296
+    },
+    {
+      "step": 25500.0,
+      "student_teacher_l1": 0.011512,
+      "student_gt_l1": 0.012607
+    },
+    {
+      "step": 26000.0,
+      "student_teacher_l1": 0.012174,
+      "student_gt_l1": 0.013179
+    },
+    {
+      "step": 26500.0,
+      "student_teacher_l1": 0.012452,
+      "student_gt_l1": 0.013322
+    },
+    {
+      "step": 27000.0,
+      "student_teacher_l1": 0.011907,
+      "student_gt_l1": 0.012965
+    },
+    {
+      "step": 27500.0,
+      "student_teacher_l1": 0.012334,
+      "student_gt_l1": 0.013224
+    },
+    {
+      "step": 28000.0,
+      "student_teacher_l1": 0.012211,
+      "student_gt_l1": 0.013169
+    },
+    {
+      "step": 28500.0,
+      "student_teacher_l1": 0.01204,
+      "student_gt_l1": 0.012955
+    },
+    {
+      "step": 29000.0,
+      "student_teacher_l1": 0.01216,
+      "student_gt_l1": 0.01303
+    },
+    {
+      "step": 29500.0,
+      "student_teacher_l1": 0.012273,
+      "student_gt_l1": 0.013124
+    },
+    {
+      "step": 30000.0,
+      "student_teacher_l1": 0.012157,
+      "student_gt_l1": 0.013132
+    }
+  ]
+}

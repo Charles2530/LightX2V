@@ -1,0 +1,182 @@
+{
+  "updated_at": "2026-09-11T07:39:14+00:00",
+  "pid": 683372,
+  "training_step": 8000,
+  "monitor_step": 8000,
+  "log_age_seconds": 21.474060773849487,
+  "alerts": [
+    "WandB 复用旧 run，已确认丢弃指标：最新警告 step 8000 < 30001。本报告使用本地 CSV/log。",
+    "输出目录仍混有高步数旧 checkpoint：checkpoint-000028000, checkpoint-000030000。现有 save_total_limit=3 在保存前按步数裁剪，会混合处理两轮 checkpoint；auto-resume 也可能选中旧轮次。",
+    "action 最近 5 个记录点中至少 3 次明显反转比例 ≥10%，需要结合损失/评测持续观察；这是筛查阈值，不是 loss 冲突证明。"
+  ],
+  "latest": {
+    "action": {
+      "step": "8000",
+      "branch": "action",
+      "layer_count": "300",
+      "has_lora": "1",
+      "trainable_layer_count": "300",
+      "valid_direction_count": "300",
+      "negative_direction_fraction": "0.6766666666666666",
+      "reversal_fraction": "0.18333333333333332",
+      "unchanged_fraction": "0.0",
+      "missing_gradient_fraction": "0.0",
+      "zero_gradient_fraction": "0.0",
+      "nonfinite_weight_layer_count": "0",
+      "nonfinite_gradient_layer_count": "0",
+      "delta_w_norm_mean": "2.359421362077849",
+      "delta_w_norm_median": "1.5653471112271995",
+      "delta_w_norm_max": "14.75734861133886",
+      "delta_w_norm_count": "300",
+      "relative_delta_w_norm_mean": "0.04460261894775382",
+      "relative_delta_w_norm_median": "0.030576574480698608",
+      "relative_delta_w_norm_max": "0.24495135519736239",
+      "relative_delta_w_norm_count": "300",
+      "interval_update_norm_mean": "0.2662969915633114",
+      "interval_update_norm_median": "0.192029562865291",
+      "interval_update_norm_max": "1.3765475366860187",
+      "interval_update_norm_count": "300",
+      "relative_interval_update_norm_mean": "0.005104736085464383",
+      "relative_interval_update_norm_median": "0.004195763600070182",
+      "relative_interval_update_norm_max": "0.022848764604351233",
+      "relative_interval_update_norm_count": "300",
+      "update_cosine_mean": "-0.06926677410433242",
+      "update_cosine_median": "-0.05017682086858058",
+      "update_cosine_max": "0.44962322460512594",
+      "update_cosine_count": "300",
+      "gradient_norm_mean": "0.00016863900913828583",
+      "gradient_norm_median": "9.120653755011502e-05",
+      "gradient_norm_max": "0.0016778029124029613",
+      "gradient_norm_count": "300",
+      "reversal_fraction_so_far_mean": "0.12106918238993712",
+      "reversal_fraction_so_far_median": "0.06918238993710692",
+      "reversal_fraction_so_far_max": "0.9811320754716981",
+      "reversal_fraction_so_far_count": "300"
+    },
+    "video": {
+      "step": "8000",
+      "branch": "video",
+      "layer_count": "300",
+      "has_lora": "1",
+      "trainable_layer_count": "300",
+      "valid_direction_count": "292",
+      "negative_direction_fraction": "0.19863013698630136",
+      "reversal_fraction": "0.010273972602739725",
+      "unchanged_fraction": "0.02666666666666667",
+      "missing_gradient_fraction": "0.0",
+      "zero_gradient_fraction": "0.02666666666666667",
+      "nonfinite_weight_layer_count": "0",
+      "nonfinite_gradient_layer_count": "0",
+      "delta_w_norm_mean": "1.2154696570211927",
+      "delta_w_norm_median": "1.0115997944085566",
+      "delta_w_norm_max": "2.954221884225097",
+      "delta_w_norm_count": "300",
+      "relative_delta_w_norm_mean": "0.013624901155132057",
+      "relative_delta_w_norm_median": "0.012787943704498655",
+      "relative_delta_w_norm_max": "0.026231226631858524",
+      "relative_delta_w_norm_count": "300",
+      "interval_update_norm_mean": "0.0675220505252215",
+      "interval_update_norm_median": "0.057174121062667324",
+      "interval_update_norm_max": "0.13498603303835793",
+      "interval_update_norm_count": "300",
+      "relative_interval_update_norm_mean": "0.0007473511211061151",
+      "relative_interval_update_norm_median": "0.0007352197369838454",
+      "relative_interval_update_norm_max": "0.0011506015344815883",
+      "relative_interval_update_norm_count": "300",
+      "update_cosine_mean": "0.07130998466030682",
+      "update_cosine_median": "0.09092411344057605",
+      "update_cosine_max": "0.2815795016454779",
+      "update_cosine_count": "292",
+      "gradient_norm_mean": "0.0006755099035921747",
+      "gradient_norm_median": "0.0004014820673356442",
+      "gradient_norm_max": "0.002747088059647899",
+      "gradient_norm_count": "300",
+      "reversal_fraction_so_far_mean": "0.002843111915223572",
+      "reversal_fraction_so_far_median": "0.0",
+      "reversal_fraction_so_far_max": "0.11949685534591195",
+      "reversal_fraction_so_far_count": "292"
+    }
+  },
+  "evaluations": [
+    {
+      "step": 500.0,
+      "student_teacher_l1": 0.010371,
+      "student_gt_l1": 0.014475
+    },
+    {
+      "step": 1000.0,
+      "student_teacher_l1": 0.010956,
+      "student_gt_l1": 0.015015
+    },
+    {
+      "step": 1500.0,
+      "student_teacher_l1": 0.011566,
+      "student_gt_l1": 0.014636
+    },
+    {
+      "step": 2000.0,
+      "student_teacher_l1": 0.012929,
+      "student_gt_l1": 0.01655
+    },
+    {
+      "step": 2500.0,
+      "student_teacher_l1": 0.010454,
+      "student_gt_l1": 0.014073
+    },
+    {
+      "step": 3000.0,
+      "student_teacher_l1": 0.011492,
+      "student_gt_l1": 0.013338
+    },
+    {
+      "step": 3500.0,
+      "student_teacher_l1": 0.013632,
+      "student_gt_l1": 0.015668
+    },
+    {
+      "step": 4000.0,
+      "student_teacher_l1": 0.015126,
+      "student_gt_l1": 0.018057
+    },
+    {
+      "step": 4500.0,
+      "student_teacher_l1": 0.012709,
+      "student_gt_l1": 0.014466
+    },
+    {
+      "step": 5000.0,
+      "student_teacher_l1": 0.01067,
+      "student_gt_l1": 0.013546
+    },
+    {
+      "step": 5500.0,
+      "student_teacher_l1": 0.011318,
+      "student_gt_l1": 0.013755
+    },
+    {
+      "step": 6000.0,
+      "student_teacher_l1": 0.011902,
+      "student_gt_l1": 0.014381
+    },
+    {
+      "step": 6500.0,
+      "student_teacher_l1": 0.011269,
+      "student_gt_l1": 0.014494
+    },
+    {
+      "step": 7000.0,
+      "student_teacher_l1": 0.010902,
+      "student_gt_l1": 0.013994
+    },
+    {
+      "step": 7500.0,
+      "student_teacher_l1": 0.015398,
+      "student_gt_l1": 0.018614
+    },
+    {
+      "step": 8000.0,
+      "student_teacher_l1": 0.012318,
+      "student_gt_l1": 0.015173
+    }
+  ]
+}
