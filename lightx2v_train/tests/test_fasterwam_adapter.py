@@ -12,6 +12,8 @@ import torch
 from torch import nn
 
 from lightx2v_train.model_zoo.native.wan.fasterwam.action_distill import CachedActionDenoiser
+from lightx2v_train.trainers.fasterwam_action_consistency.config import FastWAMActionConsistencyConfig
+from lightx2v_train.trainers.fasterwam_action_consistency.trainer import FasterWAMActionConsistencyTrainer
 from lightx2v_train.utils.registry import build_model, build_trainer
 
 
@@ -53,14 +55,48 @@ class FasterWAMAdapterTest(unittest.TestCase):
 
     def test_registry_and_config_are_wired(self):
         root = Path(__file__).parents[1]
-        config_path = root / "configs/train/fastwam_action_dmd/robotwin_action_1step_consistency_fasterwam_smoke.yaml"
+        config_path = root / "configs/train/fastwam_action_dmd/robotwin_action_1step_consistency_teacher_fasterwam.yaml"
         import yaml
         config = yaml.safe_load(config_path.read_text())
         config.setdefault("logging", {}).setdefault("wandb", {})["enable"] = False
         self.assertEqual(config["model"]["name"], "wan_fasterwam")
         self.assertEqual(config["training"]["method"], "fasterwam_action_consistency")
+        parsed = FastWAMActionConsistencyConfig.from_mapping(config)
+        self.assertEqual(parsed.flow_target, "teacher")
+        self.assertEqual(parsed.supervision_type, "flow")
+        self.assertEqual((parsed.teacher_start, parsed.teacher_end), ("t", "0"))
+        self.assertEqual(parsed.teacher_reference_steps, 10)
+        self.assertAlmostEqual(parsed.flow_loss_weight, 0.2)
         self.assertEqual(type(build_model(config)).__name__, "WanFasterWAMModel")
         self.assertEqual(type(build_trainer(config)).__name__, "FasterWAMActionConsistencyTrainer")
+
+    def test_teacher_target_runs_ten_step_rollout(self):
+        class ConstantDenoiser(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            def forward(self, action, timestep, condition):
+                self.calls.append((action.detach().clone(), timestep.detach().clone()))
+                return torch.full_like(action, 0.25)
+
+        trainer = FasterWAMActionConsistencyTrainer.__new__(FasterWAMActionConsistencyTrainer)
+        trainer.parsed = SimpleNamespace(teacher_reference_steps=10)
+        trainer.model = SimpleNamespace(
+            unwrap_module=lambda: SimpleNamespace(
+                train_action_scheduler=SimpleNamespace(num_train_timesteps=1000)
+            )
+        )
+        trainer.teacher_denoiser = ConstantDenoiser()
+        noisy_action = torch.ones(2, 3, 4)
+        sigma = torch.tensor([0.5, 0.8])
+        first_velocity = trainer.teacher_denoiser(noisy_action, sigma * 1000, None)
+
+        target, x0_target = trainer._teacher_targets(noisy_action, sigma, None, first_velocity)
+
+        self.assertEqual(len(trainer.teacher_denoiser.calls), 10)
+        torch.testing.assert_close(target, torch.full_like(target, 0.25))
+        torch.testing.assert_close(x0_target, noisy_action - sigma.view(-1, 1, 1) * 0.25)
 
     def test_checkpoint_shape_filter_keeps_only_compatible_tensors(self):
         from lightx2v_train.model_zoo.wan_fasterwam import WanFasterWAMModel

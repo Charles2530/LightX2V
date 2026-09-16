@@ -177,23 +177,38 @@ class FasterWAMActionConsistencyTrainer:
         return sigma_start.to(action.dtype), sigma_end.to(action.dtype)
 
     @torch.no_grad()
-    def _teacher_flow_target(self, noisy_action, sigma_start, condition, teacher_velocity):
-        """Average teacher velocities over uniform Euler steps from sigma_start to zero."""
+    def _teacher_rollout_inputs(self, noise, noisy_action, sigma_start, condition, teacher_velocity):
+        """Select the teacher interval without changing the student/consistency inputs."""
+        if self.parsed.teacher_start == "1":
+            noisy_action = noise
+            sigma_start = torch.ones_like(sigma_start)
+            num_timesteps = self.model.unwrap_module().train_action_scheduler.num_train_timesteps
+            teacher_velocity = self.teacher_denoiser(noisy_action, sigma_start * num_timesteps, condition)
+        sigma_end = torch.zeros_like(sigma_start, dtype=torch.float32)
+        if self.parsed.teacher_end == "r":
+            sigma_end = torch.rand_like(sigma_end) * sigma_start.float()
+        return noisy_action, sigma_start, sigma_end, teacher_velocity
+
+    @torch.no_grad()
+    def _teacher_targets(self, noisy_action, sigma_start, condition, teacher_velocity, *, sigma_end=None):
+        """Return interval mean velocity and x0, extrapolating if the rollout stops above zero."""
         steps = self.parsed.teacher_reference_steps
         num_timesteps = self.model.unwrap_module().train_action_scheduler.num_train_timesteps
         action = noisy_action.float()
         sigma = sigma_start.float()
-        delta = _expand_sigma(sigma / steps, action)
+        sigma_end = torch.zeros_like(sigma) if sigma_end is None else sigma_end.float()
+        delta = _expand_sigma((sigma - sigma_end) / steps, action)
         velocity = teacher_velocity.float()
         velocity_sum = torch.zeros_like(action)
         for index in range(steps):
             if index:
-                timestep = (sigma * (1.0 - index / steps) * num_timesteps).to(sigma_start.dtype)
+                timestep = ((sigma * (1.0 - index / steps) + sigma_end * (index / steps)) * num_timesteps).to(sigma_start.dtype)
                 velocity = self.teacher_denoiser(action.to(noisy_action.dtype), timestep, condition).float()
             velocity_sum += velocity
             action = action - delta * velocity
-        # Equals (noisy_action - clean_action) / sigma, without cancellation or division by zero.
-        return velocity_sum / steps
+        # Average directly to avoid division by zero for vanishing rollout intervals.
+        mean_velocity = velocity_sum / steps
+        return mean_velocity, action - _expand_sigma(sigma_end, action) * mean_velocity
 
     def _loss(self, inputs, condition, valid_mask):
         action = inputs["action"]
@@ -206,12 +221,14 @@ class FasterWAMActionConsistencyTrainer:
         timestep_start = sigma_start * num_timesteps
         timestep_end = sigma_end * num_timesteps
         flow_target = noise - action
+        x0_target = action
 
         with torch.no_grad():
             teacher_velocity = self.teacher_denoiser(noisy_action, timestep_start, condition)
             endpoint_action = noisy_action + (sigma_end_expanded - sigma_start_expanded) * teacher_velocity
             if self.parsed.flow_target == "teacher":
-                flow_target = self._teacher_flow_target(noisy_action, sigma_start, condition, teacher_velocity)
+                teacher_action, teacher_start, teacher_end, rollout_velocity = self._teacher_rollout_inputs(noise, noisy_action, sigma_start, condition, teacher_velocity)
+                flow_target, x0_target = self._teacher_targets(teacher_action, teacher_start, condition, rollout_velocity, sigma_end=teacher_end)
 
         student_velocity = self.student_denoiser(noisy_action, timestep_start, condition)
         student_x0 = noisy_action - sigma_start_expanded * student_velocity
@@ -221,8 +238,10 @@ class FasterWAMActionConsistencyTrainer:
 
         consistency_loss = _masked_pseudo_huber(student_x0, target_x0, valid_mask, self.parsed.huber_c)
         flow_loss = _masked_mse(student_velocity, flow_target, valid_mask)
-        loss = self.parsed.consistency_loss_weight * consistency_loss + self.parsed.flow_loss_weight * flow_loss
-        return loss, {"consistency": consistency_loss.detach(), "flow": flow_loss.detach()}
+        x0_loss = _masked_mse(student_x0, x0_target, valid_mask)
+        supervision_loss = flow_loss if self.parsed.supervision_type == "flow" else x0_loss
+        loss = self.parsed.consistency_loss_weight * consistency_loss + self.parsed.flow_loss_weight * supervision_loss
+        return loss, {"consistency": consistency_loss.detach(), "flow": flow_loss.detach(), "x0": x0_loss.detach()}
 
     def _iter_train_samples(self):
         epoch = 0
@@ -265,7 +284,9 @@ class FasterWAMActionConsistencyTrainer:
     def _training_details(self):
         return (
             f"target_steps={self.parsed.target_steps} ema_decay={self.parsed.ema_decay} "
-            f"flow_target={self.parsed.flow_target} teacher_reference_steps={self.parsed.teacher_reference_steps}"
+            f"flow_target={self.parsed.flow_target} supervision_type={self.parsed.supervision_type} "
+            f"teacher_start={self.parsed.teacher_start} teacher_end={self.parsed.teacher_end} "
+            f"teacher_reference_steps={self.parsed.teacher_reference_steps}"
         )
 
     def train(self):
