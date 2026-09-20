@@ -69,6 +69,15 @@ class ActionConsistencyCheckpointManager:
 
     def load(self, checkpoint_dir):
         trainer = self.trainer
+        with open(os.path.join(checkpoint_dir, "config.yaml"), encoding="utf-8") as handle:
+            saved_config = yaml.safe_load(handle)
+        saved_mode = saved_config.get("training", {}).get("action_consistency", {}).get("video_conditioning", "observation_only")
+        current_mode = getattr(trainer.parsed, "video_conditioning", "observation_only")
+        if saved_mode != current_mode:
+            raise RuntimeError(
+                f"Checkpoint video_conditioning={saved_mode} does not match {current_mode}; "
+                "start the corrected experiment from the released teacher, not an old distillation checkpoint."
+            )
         state = torch.load(os.path.join(checkpoint_dir, "training_state.pt"), map_location="cpu", weights_only=False)
         if int(state["world_size"]) != get_world_size():
             raise RuntimeError(f"Checkpoint world_size={state['world_size']} does not match current world_size={get_world_size()}.")

@@ -13,6 +13,13 @@ from lightx2v_train.trainers.fastwam_action_dmd.roles import (
     attach_video_role,
     configure_action_role,
 )
+from lightx2v_train.trainers.fasterwam_action_consistency.config import (
+    FastWAMActionConsistencyConfig as FasterWAMActionConsistencyConfig,
+)
+from lightx2v_train.trainers.fasterwam_action_consistency.roles import (
+    configure_student as configure_fasterwam_action_role,
+    load_role_state_dict as load_fasterwam_role_state_dict,
+)
 
 
 def parse_args():
@@ -29,13 +36,16 @@ def parse_args():
 
 
 def parse_training_config(config):
-    if config["training"].get("method") == "fastwam_action_consistency":
+    method = config["training"].get("method")
+    if method == "fasterwam_action_consistency":
+        return FasterWAMActionConsistencyConfig.from_mapping(config)
+    if method == "fastwam_action_consistency":
         return FastWAMActionConsistencyConfig.from_mapping(config)
     return FastWAMActionDmdConfig.from_mapping(config)
 
 
 def resolve_weights(parsed, weights):
-    consistency = isinstance(parsed, FastWAMActionConsistencyConfig)
+    consistency = isinstance(parsed, (FastWAMActionConsistencyConfig, FasterWAMActionConsistencyConfig))
     if weights == "auto":
         return "ema" if consistency else "student"
     if weights == "ema" and not consistency:
@@ -97,13 +107,16 @@ def main():
     model = build_model(config)
     model.load_components()
     module = model.unwrap_module()
-    student = configure_action_role(module.action_expert, parsed.student)
+    is_fasterwam = isinstance(parsed, FasterWAMActionConsistencyConfig)
+    configure_role = configure_fasterwam_action_role if is_fasterwam else configure_action_role
+    load_role = load_fasterwam_role_state_dict if is_fasterwam else load_role_state_dict
+    student = configure_role(module.action_expert, parsed.student)
     student_state = torch.load(
         os.path.join(args.checkpoint, f"{weights}_action.pt"),
         map_location="cpu",
         weights_only=True,
     )
-    load_role_state_dict(student, parsed.student.train_type, student_state)
+    load_role(student, parsed.student.train_type, student_state)
     if parsed.student.train_type == "lora":
         if args.lora_output:
             student.save_pretrained(os.path.join(args.lora_output, "action"), safe_serialization=True)
@@ -111,6 +124,8 @@ def main():
     module.action_expert = student
     module.mot.mixtures["action"] = student
     if unfreeze_video:
+        if is_fasterwam:
+            raise ValueError("FasterWAM action consistency checkpoints do not support video-unfreeze export.")
         video_state_path = os.path.join(args.checkpoint, "video.pt")
         if not os.path.isfile(video_state_path):
             raise FileNotFoundError(
@@ -119,7 +134,7 @@ def main():
             )
         video = attach_video_role(module, parsed.video)
         video_state = torch.load(video_state_path, map_location="cpu", weights_only=True)
-        load_role_state_dict(video, parsed.video.train_type, video_state)
+        load_role(video, parsed.video.train_type, video_state)
         if parsed.video.train_type == "lora":
             if args.lora_output:
                 video.save_pretrained(os.path.join(args.lora_output, "video"), safe_serialization=True)

@@ -1,0 +1,78 @@
+# LeRobot v2.1: https://huggingface.co/datasets/OpenDriveLab-org/Kai0
+model:
+  name: wan_fastwam
+  running_dtype: bf16
+  model_path: ${oc.env:WAN_MODEL_PATH,/mnt/miaohua/charles/models/Wan2.2-TI2V-5B}
+  proprio_dim: 14
+  action_dit_config:
+    action_dim: 14
+  mot_checkpoint_mixed_attn: true
+
+data:
+  train: &kai0_data
+    name: kai0_fastwam_dataset
+    dataset_dirs:
+      - ${oc.env:KAI0_DATASET_DIR,/mnt/miaohua/charles/datasets/Kai0/Task_A/base}
+    shape_meta:
+      # Concatenated left-to-right into a 224 x 672 video.
+      images: [top_head, hand_left, hand_right]
+      action: [{key: default, raw_shape: 14, shape: 14}]
+      state: [{key: default, raw_shape: 14, shape: 14}]
+    image_size: [224, 224]
+    # Absolute joint/gripper targets: repeat the last target at episode ends.
+    delta_action_dim_mask: [false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+    num_frames: 33
+    global_sample_stride: 1
+    action_video_freq_ratio: 4
+    context_len: 128
+    val_set_proportion: 0.01
+    batch_size: ${oc.env:BATCH_SIZE,2}
+    num_workers: 8
+  val:
+    <<: *kai0_data
+    batch_size: 1
+
+training:
+  method: fastwam
+  output_dir: ${oc.env:OUTPUT_DIR,runs/fastwam_kai0_flatten_fold}
+  # Initial training budget, not an epoch-equivalent LIBERO schedule.
+  max_train_iters: 150000
+  # Global batch 128 with the default 8 GPU launcher.
+  gradient_accumulation_iters: ${oc.env:GRADIENT_ACCUMULATION_ITERS,8}
+  max_grad_norm: 1.0
+  save_every_iters: 5000
+  save_total_limit: 5
+  save_final: true
+  lr_scheduler: cosine
+  lr_warmup_iters: 1500
+  optimizer:
+    learning_rate: 1.0e-4
+    weight_decay: 1.0e-2
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_epsilon: 1.0e-8
+
+inference:
+  infer_every_iters: 500
+  eval_num_inference_steps: 5
+  num_samples: 1
+  run_inference: true
+  save_video: true
+  save_preview: true
+  fps: 8  # Preview FPS; source actions are 30 Hz, video samples are 7.5 Hz.
+  tiled: false
+  seed: 42
+
+logging:
+  train_log_every_iters: 10
+
+resume:
+  auto_resume: true
+  resume_ckpt_path: null
+
+distributed:
+  backend: nccl
+  zero1:
+    enabled: true
+  sequence_parallel:
+    enabled: false

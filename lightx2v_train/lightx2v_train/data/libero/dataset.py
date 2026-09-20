@@ -167,7 +167,10 @@ def _build_dataset(config, split):
     shape_meta = _resolve_shape_meta(config)
     num_frames = int(config.get("num_frames", 33))
     observation_only_video = bool(config.get("observation_only_video", False))
-    processor = FastWAMProcessor(shape_meta, 1 if observation_only_video else num_frames)
+    processor_kwargs = {"image_size": config.get("image_size", (224, 224))}
+    if "delta_action_dim_mask" in config:
+        processor_kwargs["delta_action_dim_mask"] = config["delta_action_dim_mask"]
+    processor = FastWAMProcessor(shape_meta, 1 if observation_only_video else num_frames, **processor_kwargs)
     dataset_dirs = _dataset_roots(config)
 
     dataset = RobotVideoDataset(
@@ -187,7 +190,7 @@ def _build_dataset(config, split):
         video_backend=config.get("video_backend"),
         observation_only_video=observation_only_video,
     )
-    logger.info("[data] built LIBERO FastWAM {} dataset size={}", split, len(dataset))
+    logger.info("[data] built {} {} dataset size={}", config.get("name", "libero_fastwam_dataset"), split, len(dataset))
     return DatasetSliceRepeat(
         dataset,
         max_samples=config.get("max_samples"),
@@ -195,6 +198,7 @@ def _build_dataset(config, split):
     )
 
 
+@DATA_REGISTER("kai0_fastwam_dataset")
 @DATA_REGISTER("libero_fastwam_dataset")
 def build_libero_fastwam_dataset(data_config, train_or_val="train"):
     dataset = _build_dataset(data_config, train_or_val)

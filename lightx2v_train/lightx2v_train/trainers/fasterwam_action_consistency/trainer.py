@@ -162,11 +162,20 @@ class FasterWAMActionConsistencyTrainer:
             logger.info("[resume] restored {} from {} at iteration {}", self.training_config["method"], resume_path, current_iter)
         return current_iter
 
-    def _prepare_batch(self, sample):
+    def _prepare_batch(self, sample, *, video_generator=None):
         module = self.model.unwrap_module()
-        with torch.no_grad(), self.model.autocast_context():
+        # The released inference path explicitly manages BF16/FP32 inside VAE
+        # and VideoDiT. An outer autocast changes the frozen KV numerically.
+        precision_context = (
+            torch.autocast(device_type=self.model.device.type, enabled=False)
+            if self.parsed.video_conditioning == "one_pass_future_cache"
+            else self.model.autocast_context()
+        )
+        with torch.no_grad(), precision_context:
             inputs = module.build_inputs(sample)
-            condition = build_action_distill_condition(module, inputs)
+            condition = build_action_distill_condition(
+                module, inputs, video_conditioning=self.parsed.video_conditioning, generator=video_generator
+            )
         valid_mask = None if inputs["action_is_pad"] is None else ~inputs["action_is_pad"]
         return inputs, condition, valid_mask
 
@@ -259,13 +268,14 @@ class FasterWAMActionConsistencyTrainer:
         totals = {"ema_teacher_l1": 0.0, "ema_gt_l1": 0.0}
         count = 0
         generator = torch.Generator(device=self.model.unwrap_module().device).manual_seed(self.eval_seed)
+        video_generator = torch.Generator(device="cpu").manual_seed(self.eval_seed)
         for sample in self.dataloader_eval:
             batch_size = int(sample["video"].shape[0])
             remaining = self.eval_num_samples - count
             if batch_size > remaining:
                 sample = _slice_batch(sample, remaining)
                 batch_size = remaining
-            inputs, condition, valid_mask = self._prepare_batch(sample)
+            inputs, condition, valid_mask = self._prepare_batch(sample, video_generator=video_generator)
             noise = torch.randn(inputs["action"].shape, generator=generator, device=inputs["action"].device, dtype=inputs["action"].dtype)
             module = self.model.unwrap_module()
             with self.model.autocast_context():
@@ -286,7 +296,8 @@ class FasterWAMActionConsistencyTrainer:
             f"target_steps={self.parsed.target_steps} ema_decay={self.parsed.ema_decay} "
             f"flow_target={self.parsed.flow_target} supervision_type={self.parsed.supervision_type} "
             f"teacher_start={self.parsed.teacher_start} teacher_end={self.parsed.teacher_end} "
-            f"teacher_reference_steps={self.parsed.teacher_reference_steps}"
+            f"teacher_reference_steps={self.parsed.teacher_reference_steps} "
+            f"video_conditioning={self.parsed.video_conditioning}"
         )
 
     def train(self):

@@ -34,6 +34,7 @@ class FastWAMActionConsistencyConfig:
     supervision_type: str = "flow"
     teacher_start: str = "t"
     teacher_end: str = "0"
+    video_conditioning: str = "observation_only"
 
     @classmethod
     def from_mapping(cls, config):
@@ -48,6 +49,9 @@ class FastWAMActionConsistencyConfig:
         supervision_type = str(consistency.get("supervision_type", "flow"))
         teacher_start = str(consistency.get("teacher_start", "t"))
         teacher_end = str(consistency.get("teacher_end", "0"))
+        video_conditioning = str(consistency.get("video_conditioning", "observation_only"))
+        if video_conditioning not in {"observation_only", "one_pass_future_cache"}:
+            raise ValueError("training.action_consistency.video_conditioning must be observation_only or one_pass_future_cache.")
         ema_decay = float(consistency.get("ema_decay", 0.995))
         consistency_weight = float(consistency.get("consistency_loss_weight", 1.0))
         flow_weight = float(consistency.get("flow_loss_weight", 0.2))
@@ -81,4 +85,5 @@ class FastWAMActionConsistencyConfig:
             supervision_type=supervision_type,
             teacher_start=teacher_start,
             teacher_end=teacher_end,
+            video_conditioning=video_conditioning,
         )

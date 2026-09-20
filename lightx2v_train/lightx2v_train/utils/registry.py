@@ -139,7 +139,7 @@ def _ensure_data_registered(data_name):
         return
     if data_name == "image_dataset":
         import lightx2v_train.data.image_dataset  # noqa: F401
-    elif data_name == "libero_fastwam_dataset":
+    elif data_name in {"libero_fastwam_dataset", "kai0_fastwam_dataset"}:
         import lightx2v_train.data.libero.dataset  # noqa: F401
     elif data_name == "robotwin_fastwam_dataset":
         import lightx2v_train.data.robotwin_dataset  # noqa: F401

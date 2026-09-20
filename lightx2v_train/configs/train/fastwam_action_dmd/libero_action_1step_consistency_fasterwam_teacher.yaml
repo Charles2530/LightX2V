@@ -1,0 +1,152 @@
+model:
+  name: wan_fasterwam
+  running_dtype: bf16
+  model_path: /mnt/miaohua/charles/models/Wan2.2-TI2V-5B
+  checkpoint_path: /mnt/miaohua/charles/models/fasterwam_release/libero/step_021700.pt
+  proprio_dim: 8
+  mot_checkpoint_mixed_attn: false
+  condition_layers: [0, 4, 8, 12, 16, 20, 24, 28]
+  video_kv_fusion: interval_weighted_sum
+  video_kv_fusion_init: current_layer
+  redirect_common_files: false
+  action_dit_config:
+    action_dim: 7
+    hidden_dim: 1024
+    ffn_dim: 4096
+    num_heads: 24
+    attn_head_dim: 128
+    num_layers: 30
+    text_dim: 4096
+    freq_dim: 256
+    eps: 1.0e-6
+    noncondition_num_heads: 8
+    condition_layers: [0, 4, 8, 12, 16, 20, 24, 28]
+    use_gradient_checkpointing: false
+  video_dit_config:
+    has_image_input: false
+    patch_size: [1, 2, 2]
+    in_dim: 48
+    hidden_dim: 3072
+    ffn_dim: 14336
+    freq_dim: 256
+    text_dim: 4096
+    out_dim: 48
+    num_heads: 24
+    attn_head_dim: 128
+    num_layers: 30
+    eps: 1.0e-6
+    seperated_timestep: true
+    require_clip_embedding: false
+    require_vae_embedding: false
+    fuse_vae_embedding_in_latents: true
+    use_gradient_checkpointing: false
+    video_attention_mask_mode: first_frame_causal
+    action_conditioned: false
+    action_dim: 7
+    action_group_causal_mask_mode: group_diagonal
+
+data:
+  train: &libero_data
+    name: libero_fastwam_dataset
+    dataset_dirs:
+      - /mnt/miaohua/charles/datasets/FastWAM-LIBERO/extracted/libero_spatial_no_noops_lerobot
+      - /mnt/miaohua/charles/datasets/FastWAM-LIBERO/extracted/libero_object_no_noops_lerobot
+      - /mnt/miaohua/charles/datasets/FastWAM-LIBERO/extracted/libero_goal_no_noops_lerobot
+      - /mnt/miaohua/charles/datasets/FastWAM-LIBERO/extracted/libero_10_no_noops_lerobot
+    shape_meta:
+      images:
+        - key: image
+          raw_shape: [3, 512, 512]
+          shape: [3, 224, 224]
+        - key: wrist_image
+          raw_shape: [3, 512, 512]
+          shape: [3, 224, 224]
+      action:
+        - key: default
+          raw_shape: 7
+          shape: 7
+      state:
+        - key: default
+          raw_shape: 8
+          shape: 8
+    image_size: [224, 224]
+    video_size: [224, 448]
+    num_frames: 33
+    action_video_freq_ratio: 4
+    pretrained_norm_stats: /mnt/miaohua/charles/models/fasterwam_release/libero/dataset_stats.json
+    text_embedding_cache_dir: /mnt/miaohua/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fasterwam_libero_cache/text_embeds_cache
+    # Keep the multi-frame latent shape for future-noise KV; GT future values are not conditioning.
+    observation_only_video: false
+    val_set_proportion: 0.01
+    batch_size: 16
+    num_workers: 8
+  val:
+    <<: *libero_data
+    batch_size: 4
+    is_training_set: false
+
+training:
+  method: fasterwam_action_consistency
+  output_dir: runs/fasterwam_libero_action_1step_consistency_ts10_teacher_future
+  max_train_iters: 30000
+  gradient_accumulation_iters: 1
+  gradient_checkpointing: false
+  max_grad_norm: 1.0
+  save_every_iters: 5000
+  save_total_limit: 5
+  save_final: true
+  lr_scheduler: cosine
+  lr_warmup_iters: 500
+  student:
+    train_type: lora
+    lora:
+      rank: 128
+      alpha: 128
+      dropout: 0.0
+      target_modules: [q, k, v, o, ffn.0, ffn.2]
+      modules_to_save: []
+    optimizer:
+      learning_rate: 1.0e-4
+      weight_decay: 1.0e-2
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      adam_epsilon: 1.0e-8
+  action_consistency:
+    # Match released FasterWAM inference: observation + noisy future at video t=1000.
+    video_conditioning: one_pass_future_cache
+    teacher_start: "t"
+    teacher_end: "0"
+    supervision_type: flow
+    flow_target: teacher
+    target_steps: 10
+    teacher_reference_steps: 10
+    ema_decay: 0.995
+    consistency_loss_weight: 1.0
+    flow_loss_weight: 0.2
+    huber_c: 0.001
+
+inference:
+  infer_every_iters: 500
+  num_samples: 16
+  seed: 42
+
+logging:
+  train_log_every_iters: 10
+  wandb:
+    enable: true
+    project: fastwam-action-consistency
+    name: fasterwam-libero-action-1step-consistency-ts10-teacher-future
+    group: fasterwam-libero-action-1step-consistency
+    job_type: train
+    tags: [fastwam, fasterwam, libero, action-consistency, 1step, lora-only, 30k, teacher]
+
+resume:
+  auto_resume: false
+  resume_ckpt_path: null
+
+distributed:
+  backend: nccl
+  zero1:
+    enabled: false
+  sequence_parallel:
+    enabled: false

@@ -50,6 +50,9 @@ class FastWAMProcessor:
         self.image_size = tuple(image_size)
         self.action_state_merger = ConcatLeftAlign(shape_meta)
         self.delta_action_dim_mask = torch.as_tensor(delta_action_dim_mask, dtype=torch.bool)
+        action_width = sum(int(item["shape"]) for item in shape_meta["action"])
+        if self.delta_action_dim_mask.shape != (action_width,):
+            raise ValueError(f"delta_action_dim_mask must have {action_width} entries, got {tuple(self.delta_action_dim_mask.shape)}")
         self._normalizer = None
 
     @property

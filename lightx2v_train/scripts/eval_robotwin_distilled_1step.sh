@@ -54,7 +54,7 @@ mkdir -p "$out"
 nvidia-smi -L
 vulkaninfo --summary | grep -E 'GPU[0-9]+|deviceName|driverName|driverInfo'
 
-"$python" -u experiments/robotwin/run_robotwin_manager.py \
+"$python" -u "${ROBOTWIN_MANAGER_ENTRY:-experiments/robotwin/run_robotwin_manager.py}" \
   task=robotwin_uncond_3cam_384_distilled_1step \
   ckpt="$export_root/$name.pt" \
   EVALUATION.dataset_stats_path=/mnt/afs_1/lvchengtao/code/wam/MeanFlowWAM/checkpoints/fastwam_release/robotwin_uncond_3cam_384_dataset_stats.json \

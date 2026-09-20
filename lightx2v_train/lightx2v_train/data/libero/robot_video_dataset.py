@@ -97,9 +97,8 @@ class RobotVideoDataset(Dataset):
     def _get(self, index):
         sample = self._sample_without_padding(index)
         video = sample["pixel_values"][:, self.video_sample_indices]
-        if video.shape[0] != 2:
-            raise ValueError(f"FastWAM LIBERO expects two cameras, got {video.shape[0]}")
-        video = torch.cat((video[0], video[1]), dim=-1)
+        # Preserve shape_meta camera order (LIBERO: two views; Kai0: three).
+        video = torch.cat(tuple(video.unbind(0)), dim=-1)
         video = video.mul(2.0).sub(1.0).permute(1, 0, 2, 3).contiguous()
 
         action = sample["action"]

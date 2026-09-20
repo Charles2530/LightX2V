@@ -52,6 +52,8 @@ class FasterWAMTeacherTest(unittest.TestCase):
         for name, expected_rank, source, supervision, supervision_weight in (
             ("robotwin_action_1step_consistency_fasterwam.yaml", 128, "data", "flow", 0.0),
             ("robotwin_action_1step_consistency_teacher_fasterwam.yaml", 128, "teacher", "flow", 0.2),
+            ("libero_action_1step_consistency_fasterwam.yaml", 128, "data", "flow", 0.2),
+            ("libero_action_1step_consistency_fasterwam_teacher.yaml", 128, "teacher", "flow", 0.2),
         ):
             with (root / "configs/train/fastwam_action_dmd" / name).open(encoding="utf-8") as handle:
                 config = yaml.safe_load(handle)
@@ -65,8 +67,13 @@ class FasterWAMTeacherTest(unittest.TestCase):
             self.assertEqual(parsed.student.lora["rank"], expected_rank)
             self.assertAlmostEqual(parsed.flow_loss_weight, supervision_weight)
             if source == "teacher":
-                self.assertTrue(config["training"]["output_dir"].endswith("_teacher"))
+                self.assertTrue(config["training"]["output_dir"].endswith("_teacher_future"))
                 self.assertTrue(config["logging"]["wandb"]["name"])
+            if name.startswith("libero_"):
+                self.assertEqual(config["model"]["proprio_dim"], 8)
+                self.assertEqual(config["model"]["action_dit_config"]["action_dim"], 7)
+                self.assertFalse(config["model"]["mot_checkpoint_mixed_attn"])
+                self.assertFalse(config["data"]["train"]["observation_only_video"])
 
     def test_teacher_interval_validation(self):
         for start, end in (("t", "0"), ("1", "0"), ("t", "r"), (1, 0)):

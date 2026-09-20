@@ -106,9 +106,11 @@ data:
     num_frames: 33
     action_video_freq_ratio: 4
     observation_only_video: false
+    # RoboTwin uses absolute actions: preserve padded repeated actions as upstream does.
+    delta_action_dim_mask: &absolute_actions [false, false, false, false, false, false, false, false, false, false, false, false, false, false]
     val_set_proportion: 0.01
     pretrained_norm_stats: /mnt/miaohua/charles/datasets/FastWAM-RoboTwin/dataset_stats.json
-    text_embedding_cache_dir: /mnt/miaohua/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_robotwin_action_1step_dmd_lora_only-v3/text_embeds_cache
+    text_embedding_cache_dir: /mnt/miaohua/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fasterwam_robotwin_cache/text_embeds_cache
     batch_size: 16
     num_workers: 8
   val:
@@ -120,15 +122,16 @@ data:
     num_frames: 33
     action_video_freq_ratio: 4
     observation_only_video: false
+    delta_action_dim_mask: *absolute_actions
     val_set_proportion: 0.01
     pretrained_norm_stats: /mnt/miaohua/charles/datasets/FastWAM-RoboTwin/dataset_stats.json
-    text_embedding_cache_dir: /mnt/miaohua/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fastwam_robotwin_action_1step_dmd_lora_only-v3/text_embeds_cache
+    text_embedding_cache_dir: /mnt/miaohua/charles/codes/LightX2V_fastwam/lightx2v_train/runs/fasterwam_robotwin_cache/text_embeds_cache
     batch_size: 4
     num_workers: 8
     is_training_set: false
 training:
   method: fasterwam_action_consistency
-  output_dir: runs/fastwam_robotwin_action_1step_consistency_ts10
+  output_dir: runs/fasterwam_robotwin_action_1step_consistency_ts10_future
   max_train_iters: 30000
   gradient_accumulation_iters: 1
   gradient_checkpointing: false
@@ -159,6 +162,8 @@ training:
       adam_beta2: 0.95
       adam_epsilon: 1.0e-08
   action_consistency:
+    # Match released FasterWAM inference without adding auxiliary flow supervision.
+    video_conditioning: one_pass_future_cache
     flow_target: data
     target_steps: 10
     teacher_reference_steps: 10
@@ -175,7 +180,7 @@ logging:
   wandb:
     enable: true
     project: fastwam-action-consistency
-    name: robotwin-action-1step-consistency-ts10
+    name: fasterwam-robotwin-action-1step-consistency-ts10-future
     group: robotwin-action-1step-consistency
     job_type: train
     tags:
