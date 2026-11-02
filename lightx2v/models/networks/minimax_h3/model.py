@@ -30,6 +30,7 @@ from lightx2v.models.networks.minimax_h3.weights import (
 )
 from lightx2v.models.networks.minimax_h3.weights.tensor_parallel import unwrap_tp_linear
 from lightx2v.utils.envs import GET_DTYPE
+from lightx2v.utils.profiler import ProfilingContext4DebugL1
 from lightx2v_platform.base.global_var import AI_DEVICE
 
 H3_CHANNEL_QUANT_SCHEMES = {
@@ -403,11 +404,11 @@ class MiniMaxH3Model(BaseTransformerModel):
         if not self.use_tp:
             return
         checks = {
-            "num_attention_heads": self.config["num_attention_heads"],
-            "ffn_dim": self.config["ffn_dim"],
+            "num_attention_heads": int(self.config.get("num_attention_heads", 56)),
+            "ffn_hidden_size": int(self.config.get("ffn_hidden_size", 14336)),
         }
         if not self.use_adaln_cache:
-            checks["adaln_output_size"] = 18 * self.config["hidden_size"]
+            checks["adaln_output_size"] = 18 * int(self.config.get("hidden_size", 5376))
         invalid = {name: value for name, value in checks.items() if value % self.tp_size}
         if invalid:
             details = ", ".join(f"{name}={value}" for name, value in invalid.items())
@@ -607,12 +608,24 @@ class MiniMaxH3Model(BaseTransformerModel):
         if not infer_condition:
             raise ValueError("MiniMax-H3 does not execute an unconditional pass")
         prompt_embeds = inputs["text_encoder_output"]["prompt_embeds"]
-        pre = self.pre_infer.infer(self.pre_weight, prompt_embeds)
+        profile_modules = bool(self.config.get("h3_profile_modules", False))
+        if profile_modules:
+            with ProfilingContext4DebugL1("H3 pre_infer"):
+                pre = self.pre_infer.infer(self.pre_weight, prompt_embeds)
+        else:
+            pre = self.pre_infer.infer(self.pre_weight, prompt_embeds)
         if self.config.get("seq_parallel", False):
             pre = self._seq_parallel_pre_process(pre)
-        hidden_states = self.transformer_infer.infer(self.transformer_weights, pre)
+        if profile_modules:
+            with ProfilingContext4DebugL1("H3 transformer_blocks"):
+                hidden_states = self.transformer_infer.infer(self.transformer_weights, pre)
+        else:
+            hidden_states = self.transformer_infer.infer(self.transformer_weights, pre)
         if self.config.get("seq_parallel", False):
             hidden_states = self._seq_parallel_post_process(hidden_states, pre)
+        if profile_modules:
+            with ProfilingContext4DebugL1("H3 post_infer"):
+                return self.post_infer.infer(self.post_weight, hidden_states, pre)
         return self.post_infer.infer(self.post_weight, hidden_states, pre)
 
     @torch.no_grad()

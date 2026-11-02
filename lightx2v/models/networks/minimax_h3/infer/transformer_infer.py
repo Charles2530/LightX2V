@@ -29,6 +29,12 @@ def _warn_qkv_norm_rope_fallback_once(backend):
 class MiniMaxH3TransformerInfer(BaseTransformerInfer):
     def __init__(self, config):
         self.config = config
+        self.profile_modules = bool(config.get("h3_profile_modules", False))
+        # Recording CUDA events inside a torch.compile graph would introduce
+        # graph breaks. Keep the outer module timers available, but only enable
+        # attention/FFN event accumulation for the eager block path.
+        self.profile_kernel_events = self.profile_modules and not bool(config.get("use_compile", False))
+        self._profile_events = []
         self.hidden_size = int(config.get("hidden_size", 5376))
         self.global_num_heads = int(config.get("num_attention_heads", 56))
         if config.get("tensor_parallel", False):
@@ -164,6 +170,35 @@ class MiniMaxH3TransformerInfer(BaseTransformerInfer):
         value, gate = weights.in_proj.apply(hidden_states).chunk(2, dim=-1)
         return weights.out_proj.apply(value * F.silu(gate))
 
+    def _profile_event(self):
+        if not self.profile_kernel_events or AI_DEVICE != "cuda":
+            return None
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        return event
+
+    def _flush_profile_events(self):
+        if not self.profile_kernel_events or AI_DEVICE != "cuda" or not self._profile_events:
+            return
+        # Events are recorded on the active compute stream. Synchronizing once
+        # here makes the accumulated kernel timings queryable without placing a
+        # device-wide barrier around every individual block.
+        torch.cuda.synchronize()
+        totals = {"attention": 0.0, "ffn": 0.0}
+        counts = {"attention": 0, "ffn": 0}
+        for name, start, end in self._profile_events:
+            if start is not None and end is not None:
+                totals[name] += start.elapsed_time(end)
+                counts[name] += 1
+        self._profile_events.clear()
+        logger.info(
+            "[Profile] H3 transformer kernels attention={:.3f} ms ({} blocks), ffn={:.3f} ms ({} blocks)",
+            totals["attention"],
+            counts["attention"],
+            totals["ffn"],
+            counts["ffn"],
+        )
+
     def infer_block(self, weights, hidden_states, pre_infer_out, modulation=None):
         # Keep the Python cache lookup outside the compiled block.
         if modulation is None:
@@ -175,13 +210,21 @@ class MiniMaxH3TransformerInfer(BaseTransformerInfer):
         normed = weights.norm1.apply(hidden_states)
         normed = normed * (1.0 + scale_msa.index_select(0, indices))
         normed = normed + shift_msa.index_select(0, indices)
+        attn_start = self._profile_event()
         hidden_states = residual + gate_msa.index_select(0, indices) * self._attention(weights.attn, normed, pre_infer_out)
+        attn_end = self._profile_event()
+        if self.profile_kernel_events:
+            self._profile_events.append(("attention", attn_start, attn_end))
 
         residual = hidden_states
         normed = weights.norm2.apply(hidden_states)
         normed = normed * (1.0 + scale_mlp.index_select(0, indices))
         normed = normed + shift_mlp.index_select(0, indices)
+        ffn_start = self._profile_event()
         hidden_states = residual + gate_mlp.index_select(0, indices) * self._ff(weights.ff, normed)
+        ffn_end = self._profile_event()
+        if self.profile_kernel_events:
+            self._profile_events.append(("ffn", ffn_start, ffn_end))
         return hidden_states
 
     def _compute_adaln_table(self, weights, pre_infer_out):
@@ -231,6 +274,9 @@ class MiniMaxH3TransformerInfer(BaseTransformerInfer):
         return hidden_states
 
     def infer(self, block_weights, pre_infer_out):
+        self._profile_events.clear()
         if self.use_adaln_cache:
             self._prepare_adaln_cache(pre_infer_out)
-        return self.infer_func(block_weights.blocks, pre_infer_out.hidden_states, pre_infer_out)
+        output = self.infer_func(block_weights.blocks, pre_infer_out.hidden_states, pre_infer_out)
+        self._flush_profile_events()
+        return output

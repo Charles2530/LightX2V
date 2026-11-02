@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # set path firstly
-lightx2v_path=/path/to/LightX2V
-model_path=/path/to/MiniMax-H3
+lightx2v_path=/mnt/lm_data_afs/charles/codes/LightX2V/
+model_path=/mnt/miaohua/charles/models/MiniMax-H3
 
 # Select one platform. NVIDIA is enabled by default.
 

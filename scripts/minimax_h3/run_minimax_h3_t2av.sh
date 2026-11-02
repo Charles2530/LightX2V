@@ -11,8 +11,8 @@
 # Cache generation and inference must use the same JSON config and adaln_cache_dir.
 
 # set path firstly
-lightx2v_path=/path/to/LightX2V
-model_path=/path/to/MiniMax-H3
+lightx2v_path=/mnt/lm_data_afs/charles/codes/LightX2V/
+model_path=/mnt/miaohua/charles/models/MiniMax-H3
 
 export CUDA_VISIBLE_DEVICES=0
 
