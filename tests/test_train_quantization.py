@@ -80,6 +80,44 @@ class TestQATLinearBackward(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "quant.weight, quant.act and quant.grad_output"):
             normalize_quant_config({"weight": NVFP4, "act": None, "grad_output": NVFP4})
 
+    def test_mxfp4_formats(self):
+        from fake_quant_ops.quant.ops.mxfp import _quantize_mx
+
+        torch.manual_seed(42)
+        probe = torch.randn(4, 16) * 0.5
+        probe[:, 0] = 3.8
+
+        def quantize(value, minus_exp):
+            return _quantize_mx(value.float(), scale_bits=8, elem_format="fp4_e2m1",
+                                axes=-1, block_size=16, minus_exp=minus_exp)
+
+        self.assertFalse(torch.equal(quantize(probe, None), quantize(probe, "auto")))
+        for bit, minus_exp in (("mxfp4", None), ("mxfp4_auto", "auto")):
+            with self.subTest(bit=bit):
+                spec = {**NVFP4, "bit": bit}
+                config = normalize_quant_config({"weight": spec, "act": spec, "grad_output": spec})
+                linear = nn.Linear(16, 32)
+                qat = QATLinear(linear, config)
+                x = torch.randn(2, 3, 16, requires_grad=True)
+                xq = quantize(x.detach(), minus_exp)
+                wq = quantize(linear.weight.detach(), minus_exp)
+                output = qat(x)
+                torch.testing.assert_close(output, F.linear(xq, wq, linear.bias))
+
+                dy = torch.randn_like(output)
+                output.backward(dy)
+                grad = dy.reshape(-1, 32)
+                expected_dx = (quantize(grad, minus_exp) @ quantize(wq.T, minus_exp).T).reshape_as(x)
+                expected_dw = quantize(F.pad(grad.T, (0, 10)), minus_exp) @ quantize(F.pad(xq.reshape(-1, 16).T, (0, 10)), minus_exp).T
+                torch.testing.assert_close(x.grad, expected_dx)
+                torch.testing.assert_close(linear.weight.grad, expected_dw)
+                torch.testing.assert_close(linear.bias.grad, grad.sum(dim=0))
+
+        with self.assertRaisesRegex(ValueError, "group_size=16"):
+            normalize_quant_config({"weight": {**NVFP4, "bit": "mxfp4", "group_size": 32}})
+        with self.assertRaisesRegex(ValueError, "same format"):
+            normalize_quant_config({"weight": {**NVFP4, "bit": "mxfp4"}, "act": {**NVFP4, "bit": "mxfp4"}, "grad_output": {**NVFP4, "bit": "mxfp4_auto"}})
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for autocast")
     def test_cuda_autocast_backward(self):
         torch.manual_seed(7)
@@ -116,4 +154,4 @@ if __name__ == "__main__":
     unittest.main()
 
 
-"""PYTHONPATH=/mnt/lm_data_afs/charles/codes/LightX2V/lightx2v_train /mnt/lm_data_afs/charles/codes/LightX2V/.venv/bin/python /mnt/lm_data_afs/charles/codes/LightX2V/tests/test_train_quantization.py"""
+"""PYTHONPATH=/mnt/lm_data_afs/charles/codes/LightX2V:/mnt/lm_data_afs/charles/codes/LightX2V/lightx2v_train /mnt/lm_data_afs/charles/codes/LightX2V/.venv/bin/python /mnt/lm_data_afs/charles/codes/LightX2V/tests/test_train_quantization.py"""

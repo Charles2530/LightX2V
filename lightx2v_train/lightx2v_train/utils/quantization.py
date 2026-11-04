@@ -28,12 +28,12 @@ def normalize_quant_config(config):
             raise ValueError(f"Invalid quant.{role} fields.")
         bit, granularity = spec.get("bit"), spec.get("granularity")
         if not isinstance(bit, str) or bit not in QUANTIZER_REGISTER:
-            raise ValueError(f"quant.{role}.bit must be int4 or nvfp4, got {bit!r}.")
+            raise ValueError(f"quant.{role}.bit must be int4, nvfp4, mxfp4 or mxfp4_auto, got {bit!r}.")
         symmetric = spec.get("symmetric", True)
         if type(symmetric) is not bool:
             raise ValueError(f"quant.{role}.symmetric must be a boolean.")
-        if bit == "nvfp4" and not symmetric:
-            raise ValueError("NVFP4 only supports symmetric=true.")
+        if bit in ("nvfp4", "mxfp4", "mxfp4_auto") and not symmetric:
+            raise ValueError(f"{bit.upper()} only supports symmetric=true.")
         allowed = {"per_tensor", "per_group", "per_channel" if role == "weight" else "per_token"}
         if not isinstance(granularity, str) or granularity not in allowed:
             raise ValueError(f"Invalid quant.{role}.granularity={granularity!r}; expected {sorted(allowed)}.")
@@ -45,11 +45,13 @@ def normalize_quant_config(config):
             normalized["group_size"] = group_size
         elif "group_size" in spec:
             raise ValueError(f"quant.{role}.group_size is only valid for per_group.")
-        if bit == "nvfp4" and (granularity != "per_group" or normalized.get("group_size") != 16):
-            raise ValueError("NVFP4 requires granularity=per_group and group_size=16.")
+        if bit in ("nvfp4", "mxfp4", "mxfp4_auto") and (granularity != "per_group" or normalized.get("group_size") != 16):
+            raise ValueError(f"{bit.upper()} requires granularity=per_group and group_size=16.")
         result[role] = normalized
-    if result.get("grad_output") is not None and any(result[role] is None or result[role]["bit"] != "nvfp4" for role in ("weight", "act", "grad_output")):
-        raise ValueError("Backward NVFP4 requires quant.weight, quant.act and quant.grad_output to use nvfp4.")
+    if result.get("grad_output") is not None:
+        backward_bit = result["grad_output"]["bit"]
+        if backward_bit not in ("nvfp4", "mxfp4", "mxfp4_auto") or any(result[role] is None or result[role]["bit"] != backward_bit for role in ("weight", "act")):
+            raise ValueError("Backward NVFP4/MXFP4 requires quant.weight, quant.act and quant.grad_output to use the same format.")
     return result
 
 
@@ -114,6 +116,22 @@ class NVFP4FakeQuantizer(_FakeQuantizer):
         step = torch.where(magnitude < 2, 0.5, torch.where(magnitude < 4, 1.0, 2.0))
         discrete = (magnitude / step).round() * step * normalized.sign()
         return (discrete * scale / global_scale).reshape_as(x)
+
+
+@QUANTIZER_REGISTER("mxfp4")
+class MXFP4FakeQuantizer(_FakeQuantizer):
+    minus_exp = None
+
+    def quantize(self, x):
+        from fake_quant_ops.quant.ops.mxfp import _quantize_mx
+
+        return _quantize_mx(x, scale_bits=8, elem_format="fp4_e2m1", axes=-1,
+                            block_size=self.group_size, minus_exp=self.minus_exp)
+
+
+@QUANTIZER_REGISTER("mxfp4_auto")
+class MXFP4AutoFakeQuantizer(MXFP4FakeQuantizer):
+    minus_exp = "auto"
 
 
 def _quantize_k(x, quantizer):
