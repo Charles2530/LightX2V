@@ -1,6 +1,6 @@
 model:
     name: wan_t2v
-    pretrained_model_name_or_path: models/Wan2.1-T2V-1.3B/
+    pretrained_model_name_or_path: /mnt/miaohua/charles/models/Wan2.1-T2V-1.3B/
     max_sequence_length: 512
     running_dtype: bf16
     transformer_param_dtype: fp32
@@ -10,10 +10,10 @@ model:
     load_transformer: true
     fake:
         name: wan_t2v
-        pretrained_model_name_or_path: models/Wan2.1-T2V-1.3B/
+        pretrained_model_name_or_path: /mnt/miaohua/charles/models/Wan2.1-T2V-1.3B/
     teacher:
         name: wan_t2v
-        pretrained_model_name_or_path: models/Wan2.1-T2V-1.3B/
+        pretrained_model_name_or_path: /mnt/miaohua/charles/models/Wan2.1-T2V-1.3B/
         transformer_param_dtype: bf16
 
 distributed:
@@ -38,7 +38,7 @@ data:
     train:
         name: prompt_dataset
         data_path:
-            - data/prompts/wan22_train_prompts.txt
+            - /mnt/lm_data_afs/charles/datasets/video_from_wan/filtered_prompts/train.jsonl
         num_workers: 8
         pin_memory: true
         shuffle: true
@@ -46,7 +46,7 @@ data:
     val:
         name: prompt_dataset
         data_path:
-            - data/prompts/wan22_val_prompts.txt
+            - /mnt/lm_data_afs/charles/datasets/video_from_wan/filtered_prompts/test.jsonl
         max_samples: 2
         num_workers: 0
         shuffle: false
@@ -108,7 +108,7 @@ training:
     teacher:
         guidance_scale: 3.0
         cfg_norm: none
-    output_dir: ./output_train/wan2_1_t2v_1_3b_dmd
+    output_dir: ./output_train/wan2_1_t2v_1_3b_dmd_vigen
 
 inference:
     method: wan_t2v_infer
@@ -120,13 +120,15 @@ inference:
     enable_cfg: false
     cfg_guidance_scale: 1.0
     seed: 42
-    output_dir: ./output_infer/wan2_1_t2v_1_3b_dmd
+    output_dir: ./output_infer/wan2_1_t2v_1_3b_dmd_vigen
     infer_every_iters: 10
 
 logging:
     rank_zero_only: true
     train_log_every_iters: 1
     infer_log_every_steps: 1
+    wandb:
+        enable: true
 
 resume:
     auto_resume: true
