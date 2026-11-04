@@ -231,9 +231,53 @@ class DmdTrainer(_DmdRuntime):
                 logger.warning("Unexpected keys when loading {} student checkpoint: {}", self.trainer_name, incompatible.unexpected_keys)
         logger.info("[train] loaded {} student checkpoint path={}", self.trainer_name, model_state_path)
 
+    def _install_bf16_tensor_capture(self):
+        steps = {int(step) for step in os.getenv("BF16_CAPTURE_STEPS", "").split(",") if step}
+        layers = set(filter(None, os.getenv("BF16_CAPTURE_LAYERS", "").split(",")))
+        if not steps and not layers:
+            return steps, []
+        if not steps or not layers or self.quant_config is not None:
+            raise ValueError("BF16 tensor capture requires steps and layers on an unquantized DMD student.")
+
+        def cpu_bf16(value):
+            return value.detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
+
+        def capture_hook(module, inputs, output, *, name):
+            step = self._bf16_capture_step
+            if step is None or not output.requires_grad:
+                return
+            path = os.path.join(self.output_train_dir, "tensor_capture", f"iter_{step:04d}_rank_{os.getenv('RANK', '0')}_{name.replace('.', '_')}.pt")
+            if os.path.exists(path):
+                return
+            tensors = {
+                "forward_input": cpu_bf16(inputs[0]),
+                "forward_weight": cpu_bf16(module.weight),
+                "forward_output": cpu_bf16(output),
+            }
+            source_dtypes = (str(inputs[0].dtype), str(module.weight.dtype), str(output.dtype))
+
+            def save_grad(grad):
+                if not os.path.exists(path):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    torch.save({"source_dtypes": (*source_dtypes, str(grad.dtype)),
+                                **tensors, "backward_grad_output": cpu_bf16(grad)}, path)
+                return grad
+
+            output.register_hook(save_grad)
+
+        modules = {name: module for name, module in self.student.denoiser().named_modules()
+                   if name in layers and isinstance(module, torch.nn.Linear)}
+        missing = layers - modules.keys()
+        if missing:
+            raise ValueError(f"BF16 capture layers missing: {sorted(missing)}")
+        handles = [module.register_forward_hook(partial(capture_hook, name=name)) for name, module in modules.items()]
+        return steps, handles
+
     def train(self):
         resume_ckpt_path, current_iter = self._resolve_resume()
         self.setup(resume_ckpt_path=resume_ckpt_path)
+        self._bf16_capture_step = None
+        capture_steps, capture_handles = self._install_bf16_tensor_capture()
         if is_main_process():
             os.makedirs(self.output_train_dir, exist_ok=True)
         barrier()
@@ -278,11 +322,13 @@ class DmdTrainer(_DmdRuntime):
 
         samples = self._iter_train_samples()
         while current_iter < max_train_iters:
+            self._bf16_capture_step = current_iter + 1 if current_iter + 1 in capture_steps else None
             student_result = self._train_one_stage(
                 samples,
                 stage="student",
                 grad_accum_iters=grad_accum_iters,
             )
+            self._bf16_capture_step = None
             loss_dmd_value = student_result["dmd"]
             loss_div_value = student_result["div_loss"]
             loss_real_dmd_value = student_result["real_dmd"]
@@ -337,6 +383,8 @@ class DmdTrainer(_DmdRuntime):
                 self.run_inference(current_iter)
 
         logger.info("[train] finished iter={}/{}", current_iter, max_train_iters)
+        for handle in capture_handles:
+            handle.remove()
 
     def _train_one_stage(
         self,
