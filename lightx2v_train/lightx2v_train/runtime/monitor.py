@@ -7,7 +7,10 @@ from lightx2v_train.runtime.distributed import is_main_process
 
 
 def build_monitor(config):
-    swanlab_config = config.get("logging", {}).get("swanlab", {})
+    logging_config = config.get("logging", {})
+    if logging_config.get("wandb", {}).get("enable", False):
+        return WandBMonitor(config)
+    swanlab_config = logging_config.get("swanlab", {})
     if not swanlab_config.get("enable", False):
         return NoopMonitor()
     return SwanLabMonitor(config, swanlab_config)
@@ -19,6 +22,34 @@ class NoopMonitor:
 
     def finish(self):
         return
+
+
+class WandBMonitor:
+    def __init__(self, config):
+        self._run = None
+        if not is_main_process():
+            return
+
+        import wandb
+
+        safe_config = deepcopy(config)
+        safe_config.get("logging", {}).get("swanlab", {}).pop("api_key", None)
+        safe_config.get("logging", {}).get("wandb", {}).pop("api_key", None)
+        self._run = wandb.init(config=safe_config)
+        atexit.register(self.finish)
+        logger.info("[monitor] Weights & Biases enabled")
+
+    def log_metrics(self, metrics, step=None):
+        if self._run is None:
+            return
+        values = {key: value.item() if hasattr(value, "item") else value for key, value in metrics.items()}
+        if values:
+            self._run.log(values, step=step)
+
+    def finish(self):
+        if self._run is not None:
+            self._run.finish()
+            self._run = None
 
 
 class SwanLabMonitor:
