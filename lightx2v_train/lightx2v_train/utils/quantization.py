@@ -12,12 +12,14 @@ QUANTIZER_REGISTER = Register()
 def normalize_quant_config(config):
     if config is None:
         return None
-    if not isinstance(config, Mapping) or set(config) - {"weight", "act"}:
-        raise ValueError("quant must be a mapping containing weight and optional act.")
+    if not isinstance(config, Mapping) or set(config) - {"weight", "act", "grad_output"}:
+        raise ValueError("quant must be a mapping containing weight and optional act/grad_output.")
     if config.get("weight") is None:
         raise ValueError("quant.weight is required when QAT is enabled.")
     result = {}
-    for role in ("weight", "act"):
+    for role in ("weight", "act", "grad_output"):
+        if role == "grad_output" and role not in config:
+            continue
         spec = config.get(role)
         if spec is None:
             result[role] = None
@@ -46,6 +48,8 @@ def normalize_quant_config(config):
         if bit == "nvfp4" and (granularity != "per_group" or normalized.get("group_size") != 16):
             raise ValueError("NVFP4 requires granularity=per_group and group_size=16.")
         result[role] = normalized
+    if result.get("grad_output") is not None and any(result[role] is None or result[role]["bit"] != "nvfp4" for role in ("weight", "act", "grad_output")):
+        raise ValueError("Backward NVFP4 requires quant.weight, quant.act and quant.grad_output to use nvfp4.")
     return result
 
 
@@ -112,6 +116,43 @@ class NVFP4FakeQuantizer(_FakeQuantizer):
         return (discrete * scale / global_scale).reshape_as(x)
 
 
+def _quantize_k(x, quantizer):
+    pad = -x.shape[-1] % quantizer.group_size
+    return quantizer(F.pad(x, (0, pad)) if pad else x)
+
+
+class _BackwardQuantizedLinear(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, weight, bias, act_quantizer, weight_quantizer, grad_output_quantizer):
+        quantized_input = act_quantizer(input)
+        quantized_weight = weight_quantizer(weight)
+        ctx.save_for_backward(quantized_input, quantized_weight)
+        ctx.bias_dtype = bias.dtype if bias is not None else None
+        ctx.act_quantizer = act_quantizer
+        ctx.weight_quantizer = weight_quantizer
+        ctx.grad_output_quantizer = grad_output_quantizer
+        return F.linear(quantized_input, quantized_weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        quantized_input, quantized_weight = ctx.saved_tensors
+        grad = grad_output.reshape(-1, quantized_weight.shape[0])
+        grad_input = grad_weight = grad_bias = None
+        if ctx.needs_input_grad[0]:
+            grad_input = (
+                _quantize_k(grad, ctx.grad_output_quantizer)
+                @ _quantize_k(quantized_weight.T.to(grad.dtype), ctx.weight_quantizer).T
+            ).reshape_as(quantized_input).to(quantized_input.dtype)
+        if ctx.needs_input_grad[1]:
+            grad_weight = (
+                _quantize_k(grad.T, ctx.grad_output_quantizer)
+                @ _quantize_k(quantized_input.reshape(-1, quantized_input.shape[-1]).T.to(grad.dtype), ctx.act_quantizer).T
+            ).to(quantized_weight.dtype)
+        if ctx.needs_input_grad[2]:
+            grad_bias = grad.sum(dim=0).to(ctx.bias_dtype)
+        return grad_input, grad_weight, grad_bias, None, None, None
+
+
 class QATLinear(nn.Linear):
     def __init__(self, linear, quant_config):
         super().__init__(linear.in_features, linear.out_features, bias=linear.bias is not None, device="meta", dtype=linear.weight.dtype)
@@ -121,9 +162,13 @@ class QATLinear(nn.Linear):
         self.weight_quantizer = QUANTIZER_REGISTER[quant_config["weight"]["bit"]](quant_config["weight"])
         act = quant_config["act"]
         self.act_quantizer = None if act is None else QUANTIZER_REGISTER[act["bit"]](act)
+        grad_output = quant_config.get("grad_output")
+        self.grad_output_quantizer = None if grad_output is None else QUANTIZER_REGISTER[grad_output["bit"]](grad_output)
         self.train(linear.training)
 
     def forward(self, input):
+        if self.grad_output_quantizer is not None:
+            return _BackwardQuantizedLinear.apply(input, self.weight, self.bias, self.act_quantizer, self.weight_quantizer, self.grad_output_quantizer)
         if self.act_quantizer is not None:
             input = self.act_quantizer(input)
         return F.linear(input, self.weight_quantizer(self.weight), self.bias)
