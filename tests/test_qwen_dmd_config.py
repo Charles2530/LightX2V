@@ -1,5 +1,6 @@
 import copy
 import unittest
+from unittest.mock import patch
 
 from lightx2v_train.data import build_data, build_sample_processor
 from lightx2v_train.runtime import load_config
@@ -30,6 +31,26 @@ class QwenDmdConfigTest(unittest.TestCase):
                 config["training"]["dmd"]["sigmas"] = sigmas
                 with self.assertRaisesRegex(ValueError, "training.dmd.sigmas"):
                     DmdConfig.from_mapping(config)
+
+    def test_mxfp4_variants(self):
+        for mode, bit, backward in (
+            ("pure_dmd", None, False),
+            ("nvfp4_forward", "nvfp4", False),
+            ("nvfp4_forward_backward", "nvfp4", True),
+            ("mxfp4_forward", "mxfp4", False),
+            ("mxfp4_forward_backward", "mxfp4", True),
+            ("mxfp4_auto_forward_backward", "mxfp4_auto", True),
+        ):
+            with self.subTest(mode=mode), patch.dict("os.environ", {"QWEN_QUANT_MODE": mode}):
+                config = load_config(CONFIG_PATH)
+                quant = validate_training_quantization(config)
+                self.assertEqual(config["training"]["output_dir"].split("/")[-1], mode)
+                if bit is None:
+                    self.assertIsNone(quant)
+                else:
+                    self.assertEqual(quant["weight"]["bit"], bit)
+                    self.assertEqual(quant["act"]["bit"], bit)
+                    self.assertEqual(quant["grad_output"] is not None, backward)
 
     def test_validation_dataset_supports_image_inference(self):
         config = load_config(CONFIG_PATH)

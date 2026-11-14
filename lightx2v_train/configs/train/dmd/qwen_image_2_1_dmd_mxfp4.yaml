@@ -16,10 +16,29 @@ model:
         pretrained_model_name_or_path: ${model.pretrained_model_name_or_path}
         transformer_param_dtype: bf16
 
-quant:
-    weight: {bit: "${oc.env:QWEN_QUANT_BIT,mxfp4}", symmetric: true, granularity: per_group, group_size: 16}
-    act: {bit: "${oc.env:QWEN_QUANT_BIT,mxfp4}", symmetric: true, granularity: per_group, group_size: 16}
-    grad_output: {bit: "${oc.env:QWEN_QUANT_BIT,mxfp4}", symmetric: true, granularity: per_group, group_size: 16}
+quant_options:
+    pure_dmd: null
+    nvfp4_forward:
+        weight: &nvfp4 {bit: nvfp4, symmetric: true, granularity: per_group, group_size: 16}
+        act: *nvfp4
+        grad_output: null
+    nvfp4_forward_backward:
+        weight: *nvfp4
+        act: *nvfp4
+        grad_output: *nvfp4
+    mxfp4_forward:
+        weight: &mxfp4 {bit: mxfp4, symmetric: true, granularity: per_group, group_size: 16}
+        act: *mxfp4
+        grad_output: null
+    mxfp4_forward_backward:
+        weight: *mxfp4
+        act: *mxfp4
+        grad_output: *mxfp4
+    mxfp4_auto_forward_backward:
+        weight: &mxfp4_auto {bit: mxfp4_auto, symmetric: true, granularity: per_group, group_size: 16}
+        act: *mxfp4_auto
+        grad_output: *mxfp4_auto
+quant: ${quant_options.${oc.env:QWEN_QUANT_MODE,mxfp4_forward_backward}}
 
 distributed:
     backend: nccl
@@ -94,7 +113,7 @@ training:
         checkpoint_path: ${training.student.checkpoint_path}
         checkpoint_key: teacher_score_model
         checkpoint_strict: true
-    output_dir: /mnt/afs_1/charles/qwen_image21_runs/${oc.env:QWEN_RUN_NAME,dmd_mxfp4}
+    output_dir: /mnt/afs_1/charles/qwen_image21_runs/${oc.env:QWEN_RUN_NAME,${oc.env:QWEN_QUANT_MODE,mxfp4_forward_backward}}
 
 inference:
     method: ${oc.env:QWEN_INFER_METHOD,image_infer}
@@ -106,7 +125,7 @@ inference:
     cfg_guidance_scale: 1.0
     vae_tiling: false
     seed: 42
-    output_dir: /mnt/afs_1/charles/qwen_image21_infer/${oc.env:QWEN_RUN_NAME,dmd_mxfp4}
+    output_dir: /mnt/afs_1/charles/qwen_image21_infer/${oc.env:QWEN_RUN_NAME,${oc.env:QWEN_QUANT_MODE,mxfp4_forward_backward}}
     infer_every_iters: 100
 
 logging:
