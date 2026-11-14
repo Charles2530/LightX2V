@@ -106,9 +106,15 @@ class DmdTrainer(_DmdRuntime):
         self.fake_real_optimizer_config = copy.deepcopy(self.fake_optimizer_config)
 
     def setup(self, resume_ckpt_path=None):
-        if resume_ckpt_path is None and self.student_checkpoint_path:
+        if resume_ckpt_path is None and self.student_checkpoint_path and not self.student_config.get("checkpoint_key"):
             self._load_student_checkpoint(self.student_checkpoint_path, strict=self.student_checkpoint_strict)
         super().setup(resume_ckpt_path=None)
+        if resume_ckpt_path is None:
+            for role, model in (("student", self.model), ("fake", self.fake_model), ("teacher", self.teacher_model)):
+                role_config = self.training_config[role]
+                checkpoint_path = role_config.get("checkpoint_path")
+                if checkpoint_path and (role != "student" or role_config.get("checkpoint_key")):
+                    self._load_initial_role_weights(model, role, checkpoint_path, role_config)
         self._setup_fake_real_resources()
         if resume_ckpt_path is not None:
             self._load_resume_state(resume_ckpt_path)
@@ -230,6 +236,41 @@ class DmdTrainer(_DmdRuntime):
             if incompatible.unexpected_keys:
                 logger.warning("Unexpected keys when loading {} student checkpoint: {}", self.trainer_name, incompatible.unexpected_keys)
         logger.info("[train] loaded {} student checkpoint path={}", self.trainer_name, model_state_path)
+
+    def _load_initial_role_weights(self, model, role, checkpoint_path, role_config):
+        source_key = role_config.get("checkpoint_key", f"{role}_model")
+        if not isinstance(source_key, str) or not source_key:
+            raise ValueError(f"training.{role}.checkpoint_key must be a non-empty string.")
+        dist_path = os.path.join(checkpoint_path, "dist_state")
+        if not os.path.isfile(os.path.join(dist_path, ".metadata")):
+            raise RuntimeError(f"{role} initialization DCP metadata not found: {dist_path}")
+        reader = dcp.FileSystemReader(dist_path)
+        metadata = reader.read_metadata()
+        prefix = source_key + "."
+        source_shapes = {
+            name[len(prefix):]: tuple(value.size)
+            for name, value in metadata.state_dict_metadata.items()
+            if name.startswith(prefix)
+        }
+        if not source_shapes:
+            raise RuntimeError(f"{role} initialization has no key {source_key!r}: {dist_path}")
+        module = model.capabilities.require(ParallelCapability).state_module()
+        strict = bool(role_config.get("checkpoint_strict", True))
+        options = StateDictOptions(ignore_frozen_params=False, strict=strict)
+        model_state = get_model_state_dict(module, options=options)
+        if strict:
+            expected = set(model_state)
+            provided = set(source_shapes)
+            if expected != provided:
+                raise RuntimeError(f"{role} initialization keys differ: missing={sorted(expected - provided)[:5]}, unexpected={sorted(provided - expected)[:5]}")
+            for name, value in model_state.items():
+                if tuple(value.shape) != source_shapes[name]:
+                    raise RuntimeError(f"{role} initialization shape differs for {name}: {source_shapes[name]} vs {tuple(value.shape)}")
+        state = {source_key: model_state}
+        group = self.checkpoint_manager._get_checkpoint_process_group() if torch.distributed.is_initialized() else None
+        dcp.load(state, storage_reader=reader, process_group=group)
+        set_model_state_dict(module, model_state_dict=state[source_key], options=options)
+        logger.info("[train] initialized {} from {} key={} (fresh optimizer)", role, dist_path, source_key)
 
     def _install_bf16_tensor_capture(self):
         steps = {int(step) for step in os.getenv("BF16_CAPTURE_STEPS", "").split(",") if step}

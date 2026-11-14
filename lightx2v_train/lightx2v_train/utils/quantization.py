@@ -59,9 +59,9 @@ def validate_training_quantization(config):
     quant = normalize_quant_config(config.get("quant"))
     if quant is not None:
         model, training = config.get("model", {}), config.get("training", {})
-        allowed = {"wan_t2v", "wan_t2v_14b", "minimax_h3_t2av"}
+        allowed = {"wan_t2v", "wan_t2v_14b", "minimax_h3_t2av", "qwen_image_2_1"}
         if "cache_build" in config or training.get("method") != "dmd" or model.get("name") not in allowed or model.get("causal", False):
-            raise ValueError("QAT supports only ordinary Wan/MiniMax-H3 DMD; phased and autoregressive DMD are not supported.")
+            raise ValueError("QAT supports only ordinary Wan/MiniMax-H3/Qwen-Image-2.1 DMD; phased and autoregressive DMD are not supported.")
         if training.get("student", {}).get("train_type") != "full":
             raise ValueError("QAT requires training.student.train_type=full; LoRA is not supported.")
     return quant

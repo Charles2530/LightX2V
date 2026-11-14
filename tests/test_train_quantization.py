@@ -91,7 +91,9 @@ class TestQATLinearBackward(unittest.TestCase):
             return _quantize_mx(value.float(), scale_bits=8, elem_format="fp4_e2m1",
                                 axes=-1, block_size=16, minus_exp=minus_exp)
 
-        self.assertFalse(torch.equal(quantize(probe, None), quantize(probe, "auto")))
+        fixed_error = (quantize(probe, None) - probe).square().mean(dim=-1)
+        auto_error = (quantize(probe, "auto") - probe).square().mean(dim=-1)
+        self.assertTrue(torch.all(auto_error <= fixed_error + 1e-8))
         for bit, minus_exp in (("mxfp4", None), ("mxfp4_auto", "auto")):
             with self.subTest(bit=bit):
                 spec = {**NVFP4, "bit": bit}

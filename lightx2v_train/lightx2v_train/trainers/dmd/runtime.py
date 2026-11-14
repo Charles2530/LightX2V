@@ -91,6 +91,7 @@ class _DmdRuntime(BaseTrainer):
         self.random_schedule_sigma_min = parsed.random_schedule_sigma_min
         self.random_schedule_sigma_max = parsed.random_schedule_sigma_max
         self.random_schedule_sampling_method = parsed.random_schedule_sampling_method
+        self.rollout_sigmas = parsed.sigmas
         self._configured_latent_dtype = parsed.latent_dtype
         self.latent_dtype = parsed.latent_dtype or self.running_dtype
 
@@ -332,6 +333,7 @@ class _DmdRuntime(BaseTrainer):
             return
         self.scheduler.set_timesteps(
             self.num_inference_steps,
+            sigmas=self.rollout_sigmas,
             latent_hw=latent_hw,
             device=self.student.device,
         )

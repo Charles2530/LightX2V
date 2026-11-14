@@ -1,0 +1,119 @@
+model:
+    name: qwen_image_2_1
+    pretrained_model_name_or_path: /mnt/afs_1/charles/models/Qwen-Image-2.1
+    running_dtype: bf16
+    transformer_param_dtype: fp32
+    latent_dtype: fp32
+    text_encoder_dtype: bf16
+    vae_dtype: fp32
+    unconditional_prompt: " "
+    fake:
+        name: qwen_image_2_1
+        pretrained_model_name_or_path: ${model.pretrained_model_name_or_path}
+        transformer_param_dtype: fp32
+    teacher:
+        name: qwen_image_2_1
+        pretrained_model_name_or_path: ${model.pretrained_model_name_or_path}
+        transformer_param_dtype: bf16
+
+quant:
+    weight: {bit: "${oc.env:QWEN_QUANT_BIT,mxfp4}", symmetric: true, granularity: per_group, group_size: 16}
+    act: {bit: "${oc.env:QWEN_QUANT_BIT,mxfp4}", symmetric: true, granularity: per_group, group_size: 16}
+    grad_output: {bit: "${oc.env:QWEN_QUANT_BIT,mxfp4}", symmetric: true, granularity: per_group, group_size: 16}
+
+distributed:
+    backend: nccl
+    timeout_minutes: 120
+    sequence_parallel: {enabled: false, size: 1}
+    fsdp2:
+        enabled: true
+        size: ${oc.env:WORLD_SIZE,1}
+        reshard_after_forward: {root_reshard: false, block_reshard: true}
+        mixed_precision: {param_dtype: bf16, reduce_dtype: fp32, output_dtype: null, cast_forward_inputs: false}
+
+data:
+    processor:
+        name: qwen_image_2_1
+        size_multiple: 32
+    train:
+        name: prompt_dataset
+        data_path: [/mnt/afs_1/charles/datasets/qwen_image21_t2i/train.jsonl]
+        num_workers: 4
+        pin_memory: true
+        shuffle: true
+        drop_last: true
+    val:
+        name: prompt_dataset
+        data_path: [/mnt/afs_1/charles/datasets/qwen_image21_t2i/val.jsonl]
+        max_samples: 8
+        num_workers: 0
+        shuffle: false
+
+scheduler:
+    num_train_timesteps: 1000
+    timestep_distribution: uniform
+    min_sigma: 0.001
+    max_sigma: 1.0
+    time_shift_settings: {do_time_shift: false}
+
+training:
+    method: dmd
+    max_train_iters: ${oc.decode:${oc.env:QWEN_MAX_TRAIN_ITERS,1000}}
+    gradient_accumulation_iters: 1
+    gradient_checkpointing: true
+    max_grad_norm: 10.0
+    lr_scheduler: constant
+    lr_warmup_iters: 0
+    save_every_iters: 100
+    save_total_limit: 3
+    dmd:
+        num_inference_steps: 4
+        fake_update_ratio: 5
+        latent_dtype: fp32
+        sigmas: [1.0, 0.95418, 0.89508, 0.704534]
+        generation_shapes: [{value: [1024, 1024]}]
+        ts_schedule: false
+        ts_schedule_max: false
+        rollout: {use_ste: false}
+        score_sampling: {type: qwen_image21, latent_hw: [64, 64], min_timestep: 20, max_timestep: 980}
+    student:
+        train_type: full
+        optimizer: {learning_rate: 0.000001, adam_beta1: 0.0, adam_beta2: 0.999, weight_decay: 0.01, adam_epsilon: 0.00000001}
+        checkpoint_path: /mnt/afs_1/charles/models/qwen_image21_reflow2_teacher_score_pe_v2/checkpoint-000010000
+        checkpoint_key: reflow_model
+        checkpoint_strict: true
+    fake:
+        train_type: full
+        optimizer: {learning_rate: 0.000001, adam_beta1: 0.0, adam_beta2: 0.999, weight_decay: 0.01, adam_epsilon: 0.00000001}
+        checkpoint_path: ${training.student.checkpoint_path}
+        checkpoint_key: teacher_score_model
+        checkpoint_strict: true
+    teacher:
+        guidance_scale: 1.0
+        negative_prompt: " "
+        cfg_norm: none
+        checkpoint_path: ${training.student.checkpoint_path}
+        checkpoint_key: teacher_score_model
+        checkpoint_strict: true
+    output_dir: /mnt/afs_1/charles/qwen_image21_runs/${oc.env:QWEN_RUN_NAME,dmd_mxfp4}
+
+inference:
+    method: image_infer
+    default_width: 1024
+    default_height: 1024
+    num_inference_steps: 4
+    sigmas: ${training.dmd.sigmas}
+    enable_cfg: false
+    cfg_guidance_scale: 1.0
+    vae_tiling: false
+    seed: 42
+    output_dir: /mnt/afs_1/charles/qwen_image21_infer/${oc.env:QWEN_RUN_NAME,dmd_mxfp4}
+    infer_every_iters: 100
+
+logging:
+    rank_zero_only: true
+    train_log_every_iters: 1
+    infer_log_every_steps: 1
+
+resume:
+    auto_resume: true

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -60,6 +60,35 @@ class ContinuousUniformScoreSigmaSampler(ScoreSigmaSampler):
         return context.scheduler.clamp_training_sigma(sigma)
 
 
+@dataclass
+class QwenImage21ScoreSigmaSampler(ScoreSigmaSampler):
+    latent_hw: tuple[int, int]
+    min_timestep: int = 20
+    max_timestep: int = 980
+    _candidates: torch.Tensor | None = field(default=None, init=False, repr=False)
+
+    def sample(self, context: ScoreSigmaContext) -> torch.Tensor:
+        if self._candidates is None:
+            import numpy as np
+            from diffusers import FlowMatchEulerDiscreteScheduler
+            from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_shift
+
+            model_path = context.scheduler.config["model"]["pretrained_model_name_or_path"]
+            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(model_path, subfolder="scheduler")
+            if not scheduler.config.use_dynamic_shifting or scheduler.config.shift_terminal != 0.02:
+                raise ValueError("Qwen score sampling requires the original dynamic scheduler with shift_terminal=0.02.")
+            config = scheduler.config
+            height, width = self.latent_hw
+            mu = calculate_shift(height * width, config.base_image_seq_len, config.max_image_seq_len, config.base_shift, config.max_shift)
+            count = context.num_train_timesteps
+            scheduler.set_timesteps(count, device="cpu", sigmas=np.linspace(1.0, 1.0 / count, count), mu=mu)
+            raw = torch.arange(self.min_timestep, self.max_timestep + 1)
+            self._candidates = scheduler.sigmas[count - raw].clone()
+        candidates = self._candidates.to(context.device)
+        index = torch.randint(len(candidates), (1,), device=context.device)
+        return candidates[index]
+
+
 def build_score_sigma_sampler(
     config,
     *,
@@ -74,6 +103,16 @@ def build_score_sigma_sampler(
         raise ValueError("training.dmd.score_sampling must be a mapping.")
 
     kind = str(config.get("type", "discrete_timestep")).lower()
+    if kind == "qwen_image21":
+        if config.get("use_rollout_min", use_rollout_min) or config.get("use_rollout_max", use_rollout_max):
+            raise ValueError("Qwen score sampling uses a fixed raw-time interval; disable ts_schedule and ts_schedule_max.")
+        latent_hw = config.get("latent_hw")
+        if not isinstance(latent_hw, (list, tuple)) or len(latent_hw) != 2 or any(type(value) is not int or value <= 0 for value in latent_hw):
+            raise ValueError("Qwen score sampling requires positive latent_hw=[height, width].")
+        minimum, maximum = int(config.get("min_timestep", 20)), int(config.get("max_timestep", 980))
+        if not 1 <= minimum <= maximum <= 1000:
+            raise ValueError("Qwen score sampling requires 1 <= min_timestep <= max_timestep <= 1000.")
+        return QwenImage21ScoreSigmaSampler(tuple(latent_hw), minimum, maximum)
     if kind == "discrete_timestep":
         return DiscreteTimestepScoreSigmaSampler(
             use_rollout_min=bool(config.get("use_rollout_min", use_rollout_min)),
@@ -81,4 +120,4 @@ def build_score_sigma_sampler(
         )
     if kind == "continuous_uniform":
         return ContinuousUniformScoreSigmaSampler()
-    raise ValueError(f"Unsupported training.dmd.score_sampling.type={kind!r}; expected 'discrete_timestep' or 'continuous_uniform'.")
+    raise ValueError(f"Unsupported training.dmd.score_sampling.type={kind!r}; expected 'discrete_timestep', 'continuous_uniform' or 'qwen_image21'.")

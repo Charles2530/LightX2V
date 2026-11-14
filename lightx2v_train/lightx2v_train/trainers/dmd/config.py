@@ -51,6 +51,7 @@ class DmdConfig:
     random_schedule_sigma_max: float
     random_schedule_sampling_method: str
     latent_dtype: torch.dtype | None
+    sigmas: tuple[float, ...] | None = None
     rollout_use_ste: bool = False
 
     @classmethod
@@ -73,6 +74,13 @@ class DmdConfig:
         num_inference_steps = int(dmd.get("num_inference_steps", 4))
         if num_inference_steps <= 0:
             raise ValueError("training.dmd.num_inference_steps must be positive.")
+        sigmas = dmd.get("sigmas")
+        if sigmas is not None:
+            sigmas = tuple(float(value) for value in sigmas)
+            if len(sigmas) != num_inference_steps or sigmas[0] != 1.0 or any(not 0 < next_sigma < sigma <= 1 for sigma, next_sigma in zip(sigmas, sigmas[1:])):
+                raise ValueError("training.dmd.sigmas must start at 1 and contain num_inference_steps strictly decreasing positive values.")
+            if dmd.get("random_schedule", {}).get("enabled", False):
+                raise ValueError("training.dmd.sigmas cannot be combined with random_schedule.")
         configured_negative_prompt = teacher.get("negative_prompt")
         negative_prompt = default_negative_prompt if default_negative_prompt is not None else configured_negative_prompt
 
@@ -122,6 +130,7 @@ class DmdConfig:
                 "stratified",
             ),
             latent_dtype=latent_dtype,
+            sigmas=sigmas,
             rollout_use_ste=rollout_use_ste,
         )
 
