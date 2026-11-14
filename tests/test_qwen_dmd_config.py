@@ -1,6 +1,7 @@
 import copy
 import unittest
 
+from lightx2v_train.data import build_data, build_sample_processor
 from lightx2v_train.runtime import load_config
 from lightx2v_train.schedulers import DMDFlowMatchingScheduler
 from lightx2v_train.trainers.dmd.config import DmdConfig
@@ -29,6 +30,14 @@ class QwenDmdConfigTest(unittest.TestCase):
                 config["training"]["dmd"]["sigmas"] = sigmas
                 with self.assertRaisesRegex(ValueError, "training.dmd.sigmas"):
                     DmdConfig.from_mapping(config)
+
+    def test_validation_dataset_supports_image_inference(self):
+        config = load_config(CONFIG_PATH)
+        processor = build_sample_processor(config)
+        dataset = build_data(config, "val", sample_processor=processor).dataset
+        self.assertIs(dataset.sample_processor, processor)
+        self.assertEqual(len(dataset), 32)
+        self.assertEqual(processor.infer_target_size(dataset[0], 1024, 1024), (1024, 1024))
 
 
 if __name__ == "__main__":

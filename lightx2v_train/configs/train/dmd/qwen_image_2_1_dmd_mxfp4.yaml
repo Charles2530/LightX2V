@@ -36,16 +36,15 @@ data:
         name: qwen_image_2_1
         size_multiple: 32
     train:
-        name: prompt_dataset
+        name: image_dataset
         data_path: [/mnt/afs_1/charles/datasets/qwen_image21_t2i/train.jsonl]
         num_workers: 4
         pin_memory: true
         shuffle: true
         drop_last: true
     val:
-        name: prompt_dataset
+        name: image_dataset
         data_path: [/mnt/afs_1/charles/datasets/qwen_image21_t2i/val.jsonl]
-        max_samples: 8
         num_workers: 0
         shuffle: false
 
@@ -98,7 +97,7 @@ training:
     output_dir: /mnt/afs_1/charles/qwen_image21_runs/${oc.env:QWEN_RUN_NAME,dmd_mxfp4}
 
 inference:
-    method: image_infer
+    method: ${oc.env:QWEN_INFER_METHOD,image_infer}
     default_width: 1024
     default_height: 1024
     num_inference_steps: 4
