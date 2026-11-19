@@ -92,12 +92,12 @@ def analyze(tensor: torch.Tensor, seed: int, sample_blocks: int) -> dict:
         **{f"relative_mse_shift_{minus_exp:+d}_pct": mse_by_shift[minus_exp] for minus_exp in MINUS_EXPS},
         "valid_blocks": valid_blocks,
         "zero_blocks": zero_blocks,
-        "optimal_shift_0_blocks": int(((optimal_shift == 0) & valid).sum()),
-        "optimal_shift_minus_1_blocks": int(((optimal_shift == -1) & valid).sum()),
-        "optimal_shift_0_fraction": float(((optimal_shift == 0) & valid).sum() / valid_blocks) if valid_blocks else 0.0,
-        "optimal_shift_minus_1_fraction": float(((optimal_shift == -1) & valid).sum() / valid_blocks) if valid_blocks else 0.0,
         "nonzero_fraction": float(nonzero.float().mean()),
     }
+    for minus_exp in MINUS_EXPS:
+        count = int(((optimal_shift == minus_exp) & valid).sum())
+        stats[f"optimal_shift_blocks_{minus_exp:+d}"] = count
+        stats[f"optimal_shift_fraction_{minus_exp:+d}"] = float(count / valid_blocks) if valid_blocks else 0.0
     return stats
 
 
@@ -180,13 +180,7 @@ def main():
             for kind in TENSORS:
                 items = [r for r in rows if r["iteration"] == step and r["family"] == family and r["tensor"] == kind]
                 summary = {"iteration": step, "family": family, "tensor": kind, "snapshots": len(items)}
-                for key in [f"relative_mse_shift_{minus_exp:+d}_pct" for minus_exp in MINUS_EXPS] + [
-                    "optimal_shift_0_fraction",
-                    "optimal_shift_minus_1_fraction",
-                    "optimal_shift_0_blocks",
-                    "optimal_shift_minus_1_blocks",
-                    "nonzero_fraction",
-                ]:
+                for key in [f"relative_mse_shift_{minus_exp:+d}_pct" for minus_exp in MINUS_EXPS] + ["nonzero_fraction"]:
                     values = np.array([item[key] for item in items])
                     summary[f"{key}_median"] = float(np.median(values))
                 grouped.append(summary)
@@ -197,21 +191,19 @@ def main():
         for kind in TENSORS:
             items = [r for r in rows if r["family"] == family and r["tensor"] == kind]
             total = sum(r["sampled_blocks"] for r in items)
-            zeros = sum(r["optimal_shift_0_blocks"] for r in items)
-            minus_ones = sum(r["optimal_shift_minus_1_blocks"] for r in items)
-            optimal_rows.append(
-                {
-                    "family": family,
-                    "tensor": kind,
-                    "total_blocks": total,
-                    "valid_blocks": sum(r["valid_blocks"] for r in items),
-                    "zero_blocks": sum(r["zero_blocks"] for r in items),
-                    "shift_0_blocks": zeros,
-                    "shift_0_ratio": zeros / sum(r["valid_blocks"] for r in items) if sum(r["valid_blocks"] for r in items) else 0.0,
-                    "shift_minus_1_blocks": minus_ones,
-                    "shift_minus_1_ratio": minus_ones / sum(r["valid_blocks"] for r in items) if sum(r["valid_blocks"] for r in items) else 0.0,
-                }
-            )
+            valid = sum(r["valid_blocks"] for r in items)
+            row = {
+                "family": family,
+                "tensor": kind,
+                "total_blocks": total,
+                "valid_blocks": valid,
+                "zero_blocks": sum(r["zero_blocks"] for r in items),
+            }
+            for minus_exp in MINUS_EXPS:
+                blocks = sum(r[f"optimal_shift_blocks_{minus_exp:+d}"] for r in items)
+                row[f"shift_{minus_exp:+d}_blocks"] = blocks
+                row[f"shift_{minus_exp:+d}_ratio"] = blocks / valid if valid else 0.0
+            optimal_rows.append(row)
     write_csv(args.output_dir / "optimal_shift.csv", optimal_rows)
 
     final_step = steps[-1]
