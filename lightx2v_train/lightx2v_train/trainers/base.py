@@ -135,19 +135,14 @@ class BaseTrainer:
 
     def _build_optimizer(self, params, optimizer_config=None):
         if optimizer_config is None:
-            optimizer_config = {
-                "learning_rate": self.optimizer_learning_rate,
-                "adam_beta1": self.optimizer_adam_beta1,
-                "adam_beta2": self.optimizer_adam_beta2,
-                "weight_decay": self.optimizer_weight_decay,
-                "adam_epsilon": self.optimizer_adam_epsilon,
-            }
+            optimizer_config = self._get_optimizer_config()
         return torch.optim.AdamW(
             params,
             lr=float(optimizer_config.get("learning_rate", 1e-4)),
             betas=(float(optimizer_config.get("adam_beta1", 0.9)), float(optimizer_config.get("adam_beta2", 0.999))),
             weight_decay=float(optimizer_config.get("weight_decay", 0.01)),
             eps=float(optimizer_config.get("adam_epsilon", 1e-8)),
+            foreach=optimizer_config.get("foreach"),
         )
 
     def _build_lr_scheduler(self, optimizer, num_training_steps=None, num_warmup_steps=None):

@@ -236,13 +236,7 @@ class _DmdRuntime(BaseTrainer):
         self.fake_trainable_params = list(self.fake_model.capabilities.require(TrainableModelCapability).parameters())
         self.fake_optimizer = self._build_optimizer(
             self.fake_trainable_params,
-            {
-                "learning_rate": self.fake_optimizer_learning_rate,
-                "adam_beta1": self.fake_optimizer_adam_beta1,
-                "adam_beta2": self.fake_optimizer_adam_beta2,
-                "weight_decay": self.fake_optimizer_weight_decay,
-                "adam_epsilon": self.fake_optimizer_adam_epsilon,
-            },
+            self.fake_optimizer_config,
         )
         self.fake_lr_scheduler = self._build_lr_scheduler(
             self.fake_optimizer,

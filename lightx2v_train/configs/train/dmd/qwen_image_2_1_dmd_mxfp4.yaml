@@ -2,7 +2,7 @@ model:
     name: qwen_image_2_1
     pretrained_model_name_or_path: /mnt/afs_1/charles/models/Qwen-Image-2.1
     running_dtype: bf16
-    transformer_param_dtype: fp32
+    transformer_param_dtype: ${oc.env:QWEN_STUDENT_PARAM_DTYPE,fp32}
     latent_dtype: fp32
     text_encoder_dtype: bf16
     vae_dtype: fp32
@@ -10,7 +10,7 @@ model:
     fake:
         name: qwen_image_2_1
         pretrained_model_name_or_path: ${model.pretrained_model_name_or_path}
-        transformer_param_dtype: fp32
+        transformer_param_dtype: ${oc.env:QWEN_FAKE_PARAM_DTYPE,fp32}
     teacher:
         name: qwen_image_2_1
         pretrained_model_name_or_path: ${model.pretrained_model_name_or_path}
@@ -96,13 +96,13 @@ training:
         score_sampling: {type: qwen_image21, latent_hw: [64, 64], min_timestep: 20, max_timestep: 980}
     student:
         train_type: full
-        optimizer: {learning_rate: 0.000001, adam_beta1: 0.0, adam_beta2: 0.999, weight_decay: 0.01, adam_epsilon: 0.00000001}
+        optimizer: {learning_rate: 0.000001, adam_beta1: 0.0, adam_beta2: 0.999, weight_decay: 0.01, adam_epsilon: 0.00000001, foreach: false}
         checkpoint_path: /mnt/afs_1/charles/models/qwen_image21_reflow2_teacher_score_pe_v2/checkpoint-000010000
         checkpoint_key: reflow_model
         checkpoint_strict: true
     fake:
         train_type: full
-        optimizer: {learning_rate: 0.000001, adam_beta1: 0.0, adam_beta2: 0.999, weight_decay: 0.01, adam_epsilon: 0.00000001}
+        optimizer: {learning_rate: 0.000001, adam_beta1: 0.0, adam_beta2: 0.999, weight_decay: 0.01, adam_epsilon: 0.00000001, foreach: false}
         checkpoint_path: ${training.student.checkpoint_path}
         checkpoint_key: teacher_score_model
         checkpoint_strict: true
@@ -126,12 +126,14 @@ inference:
     vae_tiling: false
     seed: 42
     output_dir: /mnt/afs_1/charles/qwen_image21_infer/${oc.env:QWEN_RUN_NAME,${oc.env:QWEN_QUANT_MODE,mxfp4_forward_backward}}
-    infer_every_iters: 100
+    infer_every_iters: ${oc.decode:${oc.env:QWEN_INFER_EVERY_ITERS,100}}
 
 logging:
     rank_zero_only: true
     train_log_every_iters: 1
     infer_log_every_steps: 1
+    wandb:
+        enable: ${oc.decode:${oc.env:QWEN_WANDB_ENABLED,false}}
 
 resume:
     auto_resume: true
