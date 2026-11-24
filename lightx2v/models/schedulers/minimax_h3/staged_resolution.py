@@ -51,7 +51,7 @@ class MiniMaxH3StagedResolutionScheduler(MiniMaxH3ChangingResolutionScheduler):
         self.anchors = kwargs.get("keyframe_anchors", ())
         self.audio_generator = torch.Generator(device="cpu").manual_seed(int(self.generator.initial_seed()) + 999983)
         self.grid_history = [(self.latent_height, self.latent_width)]
-        if self.keep_conditions:
+        if self.keep_conditions and self.anchors:
             self._set_grid(self.video_latents[self.num_condition_video_rows :], self.latent_height, self.latent_width)
         if self.audio_mode == "freeze":
             sigmas, _ = _make_schedule(self.infer_steps - self.switch_step, self.audio_shift, self.audio_sigmas.device)
