@@ -79,3 +79,42 @@ outputs or unchanged audiovisual quality. Verify same-seed HHHH invariance,
 replicated latent consistency, memory and post-warmup request latency for the
 selected hardware. Broadcasting predictions avoids assuming independent
 rank-local quantized forwards are bitwise identical.
+
+## Stage-three quality ablations
+
+The following options select an experimental scheduler subclass when
+`changing_resolution=true`; all default to disabled. Ordinary HHHH still uses
+`MiniMaxH3Scheduler`, and the existing single-lift configuration keeps its
+original implementation.
+
+- `cr_intermediate_rate`: add a second low grid after step 0, followed by the
+  final lift after step 1. For example rate 0.375 and intermediate 0.5 evaluates
+  `[0.375, 0.5, 1, 1]`. Both lifts predict the clean endpoint before updating
+  and add fresh noise at the next original video sigma. Only this two-low-step
+  arrangement is supported for the intermediate grid.
+- `cr_keep_full_condition=true`: retain full-canvas VAE keyframe condition rows
+  while target-video rows use the low grid. Their original positions and
+  timesteps remain separate from the target grid; Qwen reference features
+  remain unchanged, as before. This increases token count and latency.
+- `cr_upsample_blur=true`: use bilinear clean-latent upsampling followed by a
+  per-frame 3×3 separable `[1,2,1]/4` Gaussian filter. It does not blur noise.
+- `cr_sigma_bump`: the staged path rescales the entire remaining video sigma
+  suffix by the lift-sigma ratio. Off-grid timesteps require exact newly built
+  AdaLN entries (`cr_extended_adaln_cache=true`) or online modulation. Merely
+  setting the flag does not build or validate cache contents; the inference
+  cache lookup must still find every exact timestep.
+- `cr_audio_mode=renoise`: estimate clean audio at the video lift, then apply
+  independent fresh audio noise at the unchanged next audio sigma.
+- `cr_audio_mode=freeze`: leave initial audio noise unchanged throughout low
+  video steps, then apply a separately shifted audio schedule over remaining
+  steps. This changes the trained joint time pairs and requires new exact
+  AdaLN entries or online modulation.
+- `cr_audio_mode=replay`: diagnostic only. The caller must supply
+  `scheduler.cr_audio_replay`, the HHHH audio states including initial and final
+  states, before every request. Each low-step update is replaced with the
+  matching teacher state. It requires a teacher rollout and is not a deployable
+  acceleration method or a quality guarantee.
+
+These options are for controlled comparisons. They do not establish quality
+parity, audiovisual synchronization, or cross-prompt robustness. Do not combine
+unmeasured changes and attribute their cumulative result to one option.

@@ -209,7 +209,16 @@ class MiniMaxH3Runner(DefaultRunner):
         if self.config.get("changing_resolution", False):
             from lightx2v.models.schedulers.minimax_h3.changing_resolution import MiniMaxH3ChangingResolutionScheduler
 
-            self.scheduler = MiniMaxH3ChangingResolutionScheduler(self.config)
+            staged = (
+                any(self.config.get(key) for key in ("cr_intermediate_rate", "cr_keep_full_condition", "cr_upsample_blur", "cr_sigma_bump"))
+                or self.config.get("cr_audio_mode", "baseline") != "baseline"
+            )
+            if staged:
+                from lightx2v.models.schedulers.minimax_h3.staged_resolution import MiniMaxH3StagedResolutionScheduler
+
+                self.scheduler = MiniMaxH3StagedResolutionScheduler(self.config)
+            else:
+                self.scheduler = MiniMaxH3ChangingResolutionScheduler(self.config)
         else:
             self.scheduler = MiniMaxH3Scheduler(self.config)
 
