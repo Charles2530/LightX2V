@@ -41,8 +41,9 @@ with the baseline. Nonintegral area reductions can correlate neighboring noise
 samples; unit variance does not make them independent. Use `fresh` to measure
 this approximation separately. Reusing `initial` noise at the lift also couples
 noise to the generated clean estimate; it is an ablation, not a quality claim.
-Condition rows are area-resized for the low stage and restored exactly for the
-high stage. Spatial RoPE preserves the normalized full-canvas footprint, with
+VAE keyframe condition rows are area-resized for the low stage and restored
+exactly for the high stage. The Qwen conditioner prefix, including its image
+features, stays unchanged; its rows must not all be counted as pure text. Spatial RoPE preserves the normalized full-canvas footprint, with
 an aspect-ratio correction for patch rounding.
 
 Supported: base-transformer T2AV/I2AV/L2AV/FL2AV, Euler, one spatial lift.
