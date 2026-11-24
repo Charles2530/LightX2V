@@ -63,3 +63,19 @@ Build AdaLN tables with the repository's existing
 `tools/cache_minimax_h3_adaln/cache_minimax_h3_adaln.py` using the final model,
 LoRA and configuration. Schedule-only cache entries remain valid across spatial
 grids; a changed sigma requires new entries or online modulation.
+
+## Low-stage SP experiment
+
+`cr_lowres_rank0_sp` defaults to `false`. With native sequence parallel enabled,
+setting it to `true` makes the sequence-parallel group's first rank evaluate
+complete low-resolution steps, then broadcast the video and audio velocity
+predictions to its peers. Every rank performs the same scheduler update. After
+the spatial lift, the original Ulysses path resumes. The option requires
+`tensor_parallel=false` and a progressive-resolution scheduler; HHHH ignores it.
+
+This changes low-stage arithmetic relative to quantized sequence exchange.
+It is an experimental scheduling option, not a claim of identical progressive
+outputs or unchanged audiovisual quality. Verify same-seed HHHH invariance,
+replicated latent consistency, memory and post-warmup request latency for the
+selected hardware. Broadcasting predictions avoids assuming independent
+rank-local quantized forwards are bitwise identical.
