@@ -33,6 +33,11 @@ bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup --image_
 CHANGING_RESOLUTION=1 bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup
 ```
 
+```bash
+# 在基线上叠加固定四步的 token 饱和（与渐进式分辨率互斥）
+TOKEN_SATURATION=1 bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup
+```
+
 结束时打印一行 JSON：`request_s`（不含加载、编译和预热）、`peak_allocated_gib`、`peak_reserved_gib`。不加 `--warmup` 时，`request_s` 包含该尺寸首次编译的开销。内置 `warmup` 只覆盖 480×480 和 544×960，所以配置里保持 `warmup=false`，由 `--warmup` 按真实尺寸预热。
 
 AdaLN cache 不存在时，入口会先用同一配置在进程内构建，已有 cache 不会被覆盖。也可以用 `tools/cache_minimax_h3_adaln/cache_minimax_h3_adaln.py --config_json <基线配置>` 单独构建。
@@ -42,6 +47,34 @@ AdaLN cache 不存在时，入口会先用同一配置在进程内构建，已�
 ## 渐进式分辨率接口
 
 基线配置已包含渐进式分辨率的全部键，`changing_resolution=false` 时不生效。打开后前 `changing_resolution_steps` 步在 `resolution_rate` 缩放后的 latent 网格上运行，再提升到完整分辨率。各键的含义、默认值和分阶段消融选项见 `configs/minimax_h3/changing_resolution/README.md`。
+
+## Token 饱和（固定四步）
+
+实现在 `lightx2v/models/schedulers/minimax_h3/token_saturation.py`，参考 Speculative Forcing（arXiv 2610.22347），按 H3 的双向单次打包序列做了改写。四步 sigma 调度不变，变化的是每一步参与前向的目标视频 token。
+
+每次前向后，对每个目标视频 token 取干净草稿 `x0_hat = x + sigma * v`（H3 的速度指向数据端）。验证器无需训练：
+
+- 稳定性：在 `token_saturation_verify_steps` 列出的前向之后，计算 `||x0_hat^(k) - x0_hat^(k-1)||`。
+- 冗余（可选）：仅在第 0 次前向之后、且请求带关键帧时，计算草稿到最近关键帧 token 的距离。
+
+分数除以草稿 token 范数的中位数，在（latent 帧、token 行、token 列）上做可分离高斯平滑（反射填充，sigma=1 时 9 抽头），再与阈值比较。低于阈值的 token 被冻结为当前草稿，后续前向不再去噪它。
+
+论文用 KV cache 保存已接受 token，在 768×1344×243 下约需 75 GB，这里改为把冻结 token 移出打包序列。落在 `token_saturation_context_stride` 空间格点上的冻结 token 保留为干净上下文行，使用关键帧的条件时间步（0.999），因此复用 conditioned 请求的 AdaLN cache 条目。最后一步结束后恢复完整布局，VAE 解码看到的仍是全部目标行。日志会打印每步的分数分位数、新冻结数、冻结比例，以及每个 token 的平均前向次数。
+
+| 配置键 | 默认 | 含义 |
+|---|---|---|
+| `token_saturation` | `false` | 总开关，也可用 `--token_saturation` / `TOKEN_SATURATION=1` 打开 |
+| `token_saturation_verify_steps` | `[1, 2]` | 做稳定性验证的前向序号，取值 1 到 `infer_steps - 2`；最后一次前向对所有 token 生效 |
+| `token_saturation_tau_stab` | `0.2` | 稳定性阈值（归一化后） |
+| `token_saturation_tau_red` | `null` | 关键帧冗余阈值，`null` 关闭 |
+| `token_saturation_max_ratio` | `0.6` | 累计冻结比例上限，须小于 1 |
+| `token_saturation_context_stride` | `2` | 冻结 token 保留为上下文的空间步长；0 全部移除，1 全部保留 |
+| `token_saturation_bucket` | `1024` | 活跃行数向上取整的粒度，减少编译形状 |
+| `token_saturation_smooth_sigma` | `[1.0, 1.0]` | 平滑的（时间, 空间）sigma |
+
+限制：只支持 Euler 四步、`feature_caching=NoCaching`、非 `veda_attn`、单卡（无 seq_parallel），不支持 Ref2AV、后缀重生成和 draft 前缀。打开后预热会跑满四步。
+
+阈值尚未标定。以上默认值只是起点，需要在 GPU 上对比基线的画质和耗时后调整；该路径还没有在 GPU 上运行过。
 
 ## 权重与环境
 
@@ -61,4 +94,4 @@ AdaLN cache 不存在时，入口会先用同一配置在进程内构建，已�
 
 单张 RTX 5090，PyTorch 2.9.1+cu130、Transformers 4.57.6、Triton 3.5.1。1344×768、243 帧、seed 0，各预热一次后测一次请求：T2AV 36.84 s，I2AV 38.62 s。这是可运行性检查，不是三次中位数性能评测。两个视频都经 ffmpeg 完整解码。I2AV 中视觉 patch Linear 相对 Conv3d 的 L2 误差为 0.004957。
 
-I2AV 实测发现 SwiGLU 融合 kernel 在 75,419 行、28,672 stride 下 int32 指针偏移溢出，已改为 int64 行偏移，回归测试为 `tests/test_h3_swiglu_large_stride.py`。另兼容了 Transformers 4.57.x/5.x 图像 token type API 的差异。
+I2AV 实测发现 SwiGLU 融合 kernel 在 75,419 行、28,672 stride 下 int32 指针偏移溢出，已改为 int64 行偏移。另兼容了 Transformers 4.57.x/5.x 图像 token type API 的差异。

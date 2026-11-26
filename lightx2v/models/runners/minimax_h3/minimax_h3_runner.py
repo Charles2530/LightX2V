@@ -148,8 +148,9 @@ class MiniMaxH3Runner(DefaultRunner):
                 self.inputs = self._run_input_encoder_local_h3()
                 self.init_run()
 
-                # Changing resolution compiles the low and the lifted grids, so warm up every step.
-                warmup_steps = self.scheduler.infer_steps if self.config.get("changing_resolution", False) else self._WARMUP_STEP_COUNT
+                # Changing resolution and token saturation change the packed shape per step, so warm up every step.
+                reshapes = self.config.get("changing_resolution", False) or self.config.get("token_saturation", False)
+                warmup_steps = self.scheduler.infer_steps if reshapes else self._WARMUP_STEP_COUNT
                 for step_index in range(min(warmup_steps, self.scheduler.infer_steps)):
                     self.scheduler.step_pre(step_index, warmup=True)
                     self.model.infer(self.inputs)
@@ -206,7 +207,11 @@ class MiniMaxH3Runner(DefaultRunner):
         super().end_run()
 
     def init_scheduler(self):
-        if self.config.get("changing_resolution", False):
+        if self.config.get("token_saturation", False):
+            from lightx2v.models.schedulers.minimax_h3.token_saturation import MiniMaxH3TokenSaturationScheduler
+
+            self.scheduler = MiniMaxH3TokenSaturationScheduler(self.config)
+        elif self.config.get("changing_resolution", False):
             from lightx2v.models.schedulers.minimax_h3.changing_resolution import MiniMaxH3ChangingResolutionScheduler
 
             staged = (

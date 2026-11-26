@@ -55,6 +55,14 @@
   "cr_renoise_noise": "fresh",
   "cr_keep_audio_rope": true,
   "cr_sigma_bump": 0.0,
+  "token_saturation": false,
+  "token_saturation_verify_steps": [1, 2],
+  "token_saturation_tau_stab": 0.2,
+  "token_saturation_tau_red": null,
+  "token_saturation_max_ratio": 0.6,
+  "token_saturation_context_stride": 2,
+  "token_saturation_bucket": 1024,
+  "token_saturation_smooth_sigma": [1.0, 1.0],
   "video_codec_options": {
     "preset": "ultrafast",
     "crf": "23"

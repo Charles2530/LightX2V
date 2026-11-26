@@ -7,6 +7,7 @@
 #   bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup
 #   bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup --image_path /path/to/first.png
 #   CHANGING_RESOLUTION=1 bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup
+#   TOKEN_SATURATION=1 bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup
 
 # set path firstly
 lightx2v_path=${lightx2v_path:-/path/to/LightX2V}
@@ -32,6 +33,9 @@ fi
 extra_args=()
 if [ "${CHANGING_RESOLUTION:-0}" = "1" ]; then
     extra_args+=(--changing_resolution)
+fi
+if [ "${TOKEN_SATURATION:-0}" = "1" ]; then
+    extra_args+=(--token_saturation)
 fi
 
 python "${lightx2v_path}/scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.py" \
