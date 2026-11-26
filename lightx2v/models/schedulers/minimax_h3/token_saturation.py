@@ -13,9 +13,13 @@ Verifier (training-free):
 * Redundancy, optional and only after forward 0 with keyframes:
   ``min_h ||x0_hat^(1) - h||`` over every keyframe token ``h``.
 
-Scores are divided by the median draft-token norm, smoothed with a separable
-Gaussian over (latent frame, token row, token column) with reflect padding,
-and then thresholded.
+Scores are divided by the median draft norm over all target tokens (frozen
+tokens count with their committed drafts), smoothed with a separable Gaussian
+over (latent frame, token row, token column) with reflect padding, and then
+thresholded. Smoothing is a normalized convolution over active tokens only, so
+frozen tokens and scores of the other verifier kind never enter it. Active
+rows are rounded up to ``token_saturation_bucket`` and the context rows are
+resized to the nearest multiple, so the packed target video rows are one too.
 
 Unlike the paper's KV cache of accepted tokens, which would need about 75 GB
 at 768x1344x243, frozen tokens leave the packed sequence. Frozen tokens on a
@@ -32,7 +36,9 @@ recomputed every forward and never updated. Stride 0 drops all frozen tokens.
 Oracle mode (``token_saturation_oracle_dir``) freezes nothing, so the output
 matches the dense sampler. It records every step's drafts and scores on one
 trajectory, measures each token's distance to its final draft, and saves the
-oracle step counts plus suggested thresholds for calibration.
+oracle step counts, per-step (marginal) thresholds, and a sequential replay
+of the online policy on that dense trajectory, with the configured thresholds
+and with thresholds calibrated step by step on the still-active tokens.
 """
 
 import json
@@ -179,7 +185,6 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
             "target_rows",
             "initial_noise",
             "frozen",
-            "scores",
             "prev_draft",
             "lattice",
             "active_ids",
@@ -210,7 +215,6 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
             raise RuntimeError(f"H3 target rows {num_targets} do not match the token grid {self.grid_shape}")
         device = self.target_rows.device
         self.frozen = torch.zeros(num_targets, dtype=torch.bool, device=device)
-        self.scores = torch.zeros(num_targets, dtype=torch.float32, device=device)
         self.prev_draft = None
         self.lattice = None
         if self.context_stride:
@@ -236,7 +240,7 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
             return
         context = self.frozen & self.lattice if self.lattice is not None else torch.zeros_like(self.frozen)
         self.active_ids = (~self.frozen).nonzero().squeeze(1)
-        self.context_ids = context.nonzero().squeeze(1)
+        self.context_ids = self._bucket_context(context)
         as_condition = self.context_timestep == "keyframe"
         self.layout_cpu = select_layout_rows(self.full_layout_cpu, self.context_ids.cpu(), self.active_ids.cpu(), as_condition)
         self.layout = _layout_to_device(self.layout_cpu, self.frozen.device)
@@ -252,26 +256,74 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
             self.active_start = condition
             self.video_latents = torch.cat((self.condition_rows, active_rows, context_rows))
 
+    @staticmethod
+    def _spread(ids, count):
+        """``count`` evenly spaced entries of ``ids``."""
+        if count <= 0:
+            return ids[:0]
+        return ids[torch.arange(count, device=ids.device) * ids.numel() // count]
+
+    def _bucket_context(self, context):
+        """Context ids, resized so active + context target rows are a multiple of ``bucket``.
+
+        Once anything is frozen the active rows are already a multiple (see
+        ``_capped_count``). The lattice count goes to the nearest multiple:
+        down by dropping evenly spaced lattice rows, or up by adding evenly
+        spaced off-lattice frozen rows when there are enough. With stride 0
+        there is no context and nothing changes.
+        """
+        lattice_ids = context.nonzero().squeeze(1)
+        count = int(lattice_ids.numel())
+        remainder = count % self.bucket
+        if remainder == 0:
+            return lattice_ids
+        extra = (self.frozen & ~context).nonzero().squeeze(1)
+        grow = self.bucket - remainder
+        if 2 * remainder >= self.bucket and grow <= extra.numel():
+            return torch.cat((lattice_ids, self._spread(extra, grow))).sort().values
+        return self._spread(lattice_ids, count - remainder)
+
     def step_pre(self, step_index, *, warmup=False):
         self._pack_rows(int(step_index))
         super().step_pre(step_index, warmup=warmup)
         self.forward_rows.append((int(self.active_ids.numel()), int(self.context_ids.numel())))
 
-    def _new_frozen_count(self, num_candidates):
-        """Cap the new commits by ``max_ratio`` and round the active rows up to ``bucket``."""
+    def _capped_count(self, num_frozen, num_candidates):
+        """New commits allowed by ``max_ratio``, with the active rows rounded up to ``bucket``."""
         total = self.frozen.numel()
-        num_frozen = int(self.frozen.sum())
         count = min(num_candidates, max(int(self.max_ratio * total) - num_frozen, 0))
-        active = total - num_frozen - count
-        active = min(math.ceil(active / self.bucket) * self.bucket, total - num_frozen)
-        return total - num_frozen - active
+        num_active = total - num_frozen
+        active = min(math.ceil((num_active - count) / self.bucket) * self.bucket, num_active)
+        return num_active - active
 
-    @staticmethod
-    def _scale(rows):
-        return rows.norm(dim=1).median().clamp_min(1e-6)
+    def _scale(self, draft):
+        """Median draft norm over every target token.
 
-    def _smoothed_scores(self):
-        return smooth_scores(self.scores.view(self.grid_shape), self.temporal_sigma, self.spatial_sigma).reshape(-1)
+        Active tokens use ``draft``; frozen rows of ``target_rows`` hold their
+        committed drafts. Online and oracle scores therefore share one scale
+        while the two trajectories agree.
+        """
+        norms = self.target_rows.float().norm(dim=1)
+        norms[self.active_ids] = draft.float().norm(dim=1)
+        return norms.median().clamp_min(1e-6)
+
+    def _masked_smooth(self, scores, active):
+        """Gaussian-smooth scores over active tokens only (normalized convolution).
+
+        Frozen tokens get zero weight and are never candidates, so stale or
+        foreign scores cannot leak into their neighbours. With every token
+        active this equals plain smoothing. Always returns a new tensor.
+        """
+        mask = active.float().view(self.grid_shape)
+        weighted = smooth_scores(scores.view(self.grid_shape) * mask, self.temporal_sigma, self.spatial_sigma)
+        weight = smooth_scores(mask, self.temporal_sigma, self.spatial_sigma)
+        return (weighted / weight.clamp_min(1e-12)).reshape(-1)
+
+    def _choose(self, smoothed, active, tau, num_frozen):
+        """Active tokens to freeze: lowest smoothed scores below ``tau``, capped by ``max_ratio``."""
+        candidates = (active & (smoothed < tau)).nonzero().squeeze(1)
+        count = self._capped_count(num_frozen, int(candidates.numel()))
+        return candidates[smoothed[candidates].argsort()[:count]], int(candidates.numel())
 
     def _verify(self, draft):
         """Score active tokens after forward ``step_index`` and freeze the saturated ones."""
@@ -279,67 +331,125 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
         if step == 0:
             if self.tau_red is None or self.condition_rows.shape[0] == 0:
                 return
-            raw, tau, kind = _min_distance(draft, self.condition_rows.float()) / self._scale(draft), self.tau_red, "redundancy"
+            kind, tau = "redundancy", self.tau_red
+            raw = _min_distance(draft, self.condition_rows.float()) / self._scale(draft)
         elif step in self.verify_steps:
-            raw, tau, kind = (draft - self.prev_draft[self.active_ids]).norm(dim=1) / self._scale(draft), self.tau_stab, "stability"
+            kind, tau = "stability", self.tau_stab
+            raw = (draft - self.prev_draft[self.active_ids]).norm(dim=1) / self._scale(draft)
         else:
             return
-        self.scores[self.active_ids] = raw
-        smoothed = self._smoothed_scores()
-        candidates = ((smoothed < tau) & ~self.frozen).nonzero().squeeze(1)
-        count = self._new_frozen_count(int(candidates.numel()))
-        if count > 0:
-            chosen = candidates[smoothed[candidates].argsort()[:count]]
+        active = ~self.frozen
+        scores = torch.zeros_like(self.frozen, dtype=torch.float32)
+        scores[self.active_ids] = raw
+        chosen, num_candidates = self._choose(self._masked_smooth(scores, active), active, tau, int(self.frozen.sum()))
+        if chosen.numel():
             # ``draft`` is ordered like ``active_ids``; map chosen target ids to draft rows.
             position = torch.full_like(self.frozen, -1, dtype=torch.long)
             position[self.active_ids] = torch.arange(self.active_ids.numel(), device=position.device)
-            self.target_rows[chosen] = draft[position[chosen]]
+            self.target_rows[chosen] = draft[position[chosen]].to(self.target_rows.dtype)
             self.frozen[chosen] = True
         if not self.is_warmup_step:
             quantiles = torch.quantile(raw.float(), torch.tensor([0.1, 0.5, 0.9], device=raw.device)).tolist()
             ratio = float(self.frozen.float().mean())
             logger.info(
                 f"MiniMax-H3 token saturation step {step} ({kind}, tau={tau:g}): score q10/q50/q90={[round(q, 4) for q in quantiles]}, "
-                f"candidates={int(candidates.numel())}, frozen +{count} -> {ratio:.3f}"
+                f"candidates={num_candidates}, frozen +{int(chosen.numel())} -> {ratio:.3f}"
             )
 
     def _record_oracle(self, draft):
-        """Dense trajectory: keep this step's draft and its training-free scores."""
+        """Dense trajectory: keep this step's draft and unnormalized verifier distances."""
         record = {"draft": draft.float()}
-        scale = self._scale(draft)
         if self.step_index > 0:
-            self.scores.copy_((draft - self.prev_draft).norm(dim=1) / scale)
-            record["stability"], record["stability_smoothed"] = self.scores.clone(), self._smoothed_scores()
+            record["stability"] = (draft - self.prev_draft).norm(dim=1)
         if self.step_index == 0 and self.condition_rows.shape[0]:
-            self.scores.copy_(_min_distance(draft, self.condition_rows.float()) / scale)
-            record["redundancy"], record["redundancy_smoothed"] = self.scores.clone(), self._smoothed_scores()
+            record["redundancy"] = _min_distance(draft, self.condition_rows.float())
         self.oracle_records.append(record)
 
     def _calibrate(self, scores, good):
-        """Largest threshold whose accepted tokens reach ``oracle_precision``."""
-        order = scores.argsort()
-        ranked = scores[order]
+        """Largest ``tau`` whose accepted set ``scores < tau`` reaches ``oracle_precision``.
+
+        The cut is made only after a complete group of equal scores, so the
+        set ``scores < tau`` is exactly the prefix that was checked. The
+        statistics are then recomputed on that set.
+        """
+        ranked, order = scores.sort()
         hits = good[order].float().cumsum(0)
-        precision = hits / torch.arange(1, scores.numel() + 1, device=scores.device)
-        valid = (precision >= self.oracle_precision).nonzero()
-        if valid.numel() == 0:
-            return {"tau": 0.0, "accepted_fraction": 0.0, "precision": None, "recall": 0.0}
-        last = int(valid[-1])
-        # Freezing uses ``score < tau``, so take the next score as the bound.
-        tau = float(ranked[last + 1]) if last + 1 < ranked.numel() else float(ranked[last]) * (1 + 1e-6) + 1e-12
+        counts = torch.arange(1, ranked.numel() + 1, device=ranked.device)
+        group_end = torch.ones_like(ranked, dtype=torch.bool)
+        group_end[:-1] = ranked[1:] > ranked[:-1]
+        valid = (group_end & (hits / counts >= self.oracle_precision)).nonzero()
+        tau = 0.0
+        if valid.numel():
+            last = int(valid[-1])
+            # float32 bound, so comparing float32 scores with it is exact.
+            bound = ranked[last + 1] if last + 1 < ranked.numel() else torch.nextafter(ranked[last], ranked.new_tensor(math.inf))
+            tau = float(bound)
+        accepted = scores < tau
+        num_accepted = int(accepted.sum())
         return {
             "tau": tau,
-            "accepted_fraction": (last + 1) / scores.numel(),
-            "precision": float(precision[last]),
-            "recall": float(hits[last] / good.sum().clamp_min(1)),
+            "accepted_fraction": num_accepted / max(int(scores.numel()), 1),
+            "precision": float(good[accepted].float().mean()) if num_accepted else None,
+            "recall": float((accepted & good).sum() / good.sum().clamp_min(1)),
         }
+
+    def _verify_plan(self, use_config):
+        """(step, kind) pairs the online verifier runs, in order."""
+        plan = []
+        if "redundancy" in self.oracle_records[0] and (not use_config or self.tau_red is not None):
+            plan.append((0, "redundancy"))
+        return plan + [(step, "stability") for step in self.verify_steps]
+
+    def _replay(self, rel, eps_list, eps=None):
+        """Replay online freezing on the dense trajectory.
+
+        Uses the online rules: full-token scale with committed drafts for
+        frozen tokens, masked smoothing, ``max_ratio`` and ``bucket``. With
+        ``eps`` each step's ``tau`` is calibrated on the still-active tokens;
+        without it the configured thresholds are used. The dense trajectory
+        stands in for the online one, so drift caused by freezing is not modelled.
+        """
+        records = self.oracle_records
+        num_tokens = rel.shape[1]
+        frozen = torch.zeros(num_tokens, dtype=torch.bool, device=rel.device)
+        freeze_step = torch.full((num_tokens,), self.infer_steps - 1, dtype=torch.long, device=rel.device)
+        committed_norm = torch.zeros(num_tokens, dtype=torch.float32, device=rel.device)
+        steps = []
+        for step, kind in self._verify_plan(use_config=eps is None):
+            draft_norm = records[step]["draft"].norm(dim=1)
+            scale = torch.where(frozen, committed_norm, draft_norm).median().clamp_min(1e-6)
+            active = ~frozen
+            smoothed = self._masked_smooth(records[step][kind] / scale, active)
+            if eps is None:
+                tau = self.tau_red if kind == "redundancy" else self.tau_stab
+            else:
+                tau = self._calibrate(smoothed[active], rel[step][active] <= eps)["tau"]
+            chosen, num_candidates = self._choose(smoothed, active, tau, int(frozen.sum()))
+            steps.append({"step": step, "kind": kind, "tau": tau, "candidates": num_candidates, "frozen_new": int(chosen.numel())})
+            frozen[chosen] = True
+            freeze_step[chosen] = step
+            committed_norm[chosen] = draft_norm[chosen]
+        # Error of each committed token against the dense final draft; unfrozen tokens end exact.
+        error = torch.zeros(num_tokens, dtype=torch.float32, device=rel.device)
+        error[frozen] = rel[freeze_step[frozen], frozen.nonzero().squeeze(1)]
+        result = {
+            "steps": steps,
+            "frozen_fraction": round(float(frozen.float().mean()), 4),
+            "mean_forwards": round(float((freeze_step + 1).float().mean()), 4),
+            "frozen_ok_fraction": {f"{value:g}": (round(float((error[frozen] <= value).float().mean()), 4) if bool(frozen.any()) else None) for value in eps_list},
+        }
+        if bool(frozen.any()):
+            quantiles = torch.tensor([0.5, 0.9, 0.99], device=rel.device)
+            result["frozen_rel_q50_q90_q99"] = [round(q, 5) for q in torch.quantile(error[frozen], quantiles).tolist()]
+        return result
 
     def _finish_oracle(self, final_draft):
         """Compare every draft with the final one, then save step counts and thresholds."""
         final = final_draft.float()
-        scale = self._scale(final)
+        scale = final.norm(dim=1).median().clamp_min(1e-6)
         rel = torch.stack([(record["draft"] - final).norm(dim=1) / scale for record in self.oracle_records])
         quantiles = torch.tensor([0.1, 0.5, 0.9, 0.99], device=rel.device)
+        steps = self.infer_steps
         summary = {
             "seed": self.seed,
             "size": [self.height, self.width],
@@ -352,22 +462,30 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
             "oracle": {},
             "calibration": {},
         }
-        steps = self.infer_steps
         for eps in self.oracle_eps:
             ok = rel <= eps
             first = torch.where(ok.any(0), ok.float().argmax(0), torch.full_like(ok[0], steps - 1, dtype=torch.long))
             forwards = first + 1
             summary["oracle"][f"{eps:g}"] = {"mean_forwards": round(float(forwards.float().mean()), 4), "forwards_histogram": torch.bincount(forwards, minlength=steps + 1)[1:].tolist()}
+        # Marginal calibration: every token active, each step on its own.
+        tensors = {"grid_shape": self.grid_shape, "rel_to_final": rel.cpu()}
+        all_active = torch.ones(rel.shape[1], dtype=torch.bool, device=rel.device)
         targets = [("stability", step) for step in range(1, steps - 1)]
         if "redundancy" in self.oracle_records[0]:
             targets.append(("redundancy", 0))
         for name, step in targets:
-            scores = self.oracle_records[step][f"{name}_smoothed"]
-            summary["calibration"][f"{name}_step{step}"] = {f"{eps:g}": self._calibrate(scores, rel[step] <= eps) for eps in self.oracle_eps}
+            scores = self.oracle_records[step][name] / self.oracle_records[step]["draft"].norm(dim=1).median().clamp_min(1e-6)
+            smoothed = self._masked_smooth(scores, all_active)
+            tensors[f"{name}_step{step}"], tensors[f"{name}_smoothed_step{step}"] = scores.cpu(), smoothed.cpu()
+            summary["calibration"][f"{name}_step{step}"] = {f"{eps:g}": self._calibrate(smoothed, rel[step] <= eps) for eps in self.oracle_eps}
+        # Sequential replay of the online policy: configured thresholds, then per-eps calibrated ones.
+        summary["replay"] = {
+            "config": self._replay(rel, self.oracle_eps),
+            "calibrated": {f"{eps:g}": self._replay(rel, self.oracle_eps, eps=eps) for eps in self.oracle_eps},
+        }
         self.oracle_dir.mkdir(parents=True, exist_ok=True)
         stem = self.oracle_dir / f"token_saturation_oracle_seed{self.seed}_{self.height}x{self.width}x{self.num_frames}"
-        tensors = {f"{key}_step{step}": value.cpu() for step, record in enumerate(self.oracle_records) for key, value in record.items() if key != "draft"}
-        torch.save({"grid_shape": self.grid_shape, "rel_to_final": rel.cpu(), **tensors}, stem.with_suffix(".pt"))
+        torch.save(tensors, stem.with_suffix(".pt"))
         stem.with_suffix(".json").write_text(json.dumps(summary, indent=2))
         logger.info(f"MiniMax-H3 token saturation oracle (eps -> mean forwards): {json.dumps(summary['oracle'])}, saved to {stem}.json/.pt")
 

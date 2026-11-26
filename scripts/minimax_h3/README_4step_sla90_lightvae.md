@@ -57,7 +57,7 @@ AdaLN cache 不存在时，入口会先用同一配置在进程内构建，已�
 - 稳定性：在 `token_saturation_verify_steps` 列出的前向之后，计算 `||x0_hat^(k) - x0_hat^(k-1)||`。
 - 冗余（可选）：仅在第 0 次前向之后、且请求带关键帧时，计算草稿到最近关键帧 token 的距离。
 
-分数除以草稿 token 范数的中位数，在（latent 帧、token 行、token 列）上做可分离高斯平滑（反射填充，sigma=1 时 9 抽头），再与阈值比较。低于阈值的 token 被冻结为当前草稿，后续前向不再去噪它。
+分数除以全部目标 token 草稿范数的中位数（已冻结 token 用其提交值），在（latent 帧、token 行、token 列）上做可分离高斯平滑（反射填充，sigma=1 时 9 抽头），再与阈值比较。平滑只在活跃 token 上做归一化卷积 `smooth(score·mask) / smooth(mask)`，已冻结 token 和另一种分数都不参与。低于阈值的 token 被冻结为当前草稿，后续前向不再去噪它。
 
 论文用 KV cache 保存已接受 token，在 768×1344×243 下约需 75 GB，这里改为把冻结 token 移出打包序列。落在 `token_saturation_context_stride` 空间格点上的冻结 token 保留为上下文行，每次前向重新计算，输出丢弃。上下文行的噪声水平由 `token_saturation_context_timestep` 决定：
 
@@ -73,8 +73,8 @@ AdaLN cache 不存在时，入口会先用同一配置在进程内构建，已�
 | `token_saturation_tau_stab` | `0.2` | 稳定性阈值（归一化后） |
 | `token_saturation_tau_red` | `null` | 关键帧冗余阈值，`null` 关闭 |
 | `token_saturation_max_ratio` | `0.6` | 累计冻结比例上限，须小于 1 |
-| `token_saturation_context_stride` | `2` | 冻结 token 保留为上下文的空间步长；0 全部移除，1 全部保留 |
-| `token_saturation_bucket` | `1024` | 活跃行数向上取整的粒度，减少编译形状 |
+| `token_saturation_context_stride` | `2` | 冻结 token 保留为上下文的空间步长；0 全部移除，1 全部保留（之后仍按 `bucket` 取整） |
+| `token_saturation_bucket` | `1024` | 活跃行数向上取整到该粒度；上下文行数取最近的倍数（等间隔去掉格点行，或补入格点外的冻结行），使目标视频行总数对齐。文本和音频行不在内，整条序列不一定对齐 |
 | `token_saturation_smooth_sigma` | `[1.0, 1.0]` | 平滑的（时间, 空间）sigma |
 | `token_saturation_context_timestep` | `"current"` | 上下文行的噪声水平：`current` 或 `keyframe`，见上文 |
 | `token_saturation_oracle_dir` | `null` | 非空时进入 oracle 标定模式，结果写到该目录，也可用 `--token_saturation_oracle_dir` / `TOKEN_SATURATION_ORACLE_DIR` 设置 |
@@ -92,10 +92,14 @@ TOKEN_SATURATION_ORACLE_DIR=/path/to/oracle bash scripts/minimax_h3/run_minimax_
 
 oracle 模式下不冻结任何 token，每步只记录草稿和分数。最后一步后，对每个 token 计算各步草稿到最终输出的相对误差 `rel_k = ||x0_hat^(k) - x0_final|| / median||x0_final||`，并写出两个文件，文件名为 `token_saturation_oracle_seed{seed}_{H}x{W}x{F}`：
 
-- `.json`：每步 `rel_k` 的 10/50/90/99 分位数；每个 `eps` 下的 oracle 平均前向次数（`rel_k <= eps` 的最早一步加 1，否则为 4）和前向次数直方图；以及阈值标定结果。标定对每个稳定性验证步 1 到 `infer_steps - 2`（有关键帧时再加第 0 步的冗余分数），找出最大的 `tau`，使平滑分数低于 `tau` 的 token 中 `rel_k <= eps` 的比例不低于 `oracle_precision`，并给出对应的接受比例、精度和召回率。
+- `.json`：
+  - `rel_to_final_q10_q50_q90_q99`：每步 `rel_k` 的分位数。
+  - `oracle`：每个 `eps` 下的 oracle 平均前向次数（`rel_k <= eps` 的最早一步加 1，否则为 4）和前向次数直方图，是该 `eps` 下的上限参考。
+  - `calibration`：逐步独立（边际）标定。对每个稳定性步 1 到 `infer_steps - 2`（有关键帧时再加第 0 步的冗余分数），找出最大的 `tau`，使 `score < tau` 的 token 中 `rel_k <= eps` 的比例不低于 `oracle_precision`。只在同分组的边界处截断，接受比例、精度和召回率都按 `score < tau` 的实际集合重算。
+  - `replay`：在稠密轨迹上按在线规则依次重放冻结，使用相同的尺度、带 mask 的平滑、`max_ratio` 和 `bucket`。`config` 用配置里的阈值；`calibrated` 对每个 `eps` 在仍活跃的 token 上逐步标定 `tau`。每项给出各步的 `tau` 和新冻结数、冻结比例、平均前向次数，以及冻结 token 相对最终输出的误差分位数和 `rel <= eps` 的比例。
 - `.pt`：`rel_to_final`（步数 × token）以及每步原始和平滑后的分数，用于离线分析。
 
-把选中的 `eps` 下的 `tau` 填入 `token_saturation_tau_stab` / `token_saturation_tau_red`，再关闭 oracle 运行。oracle 平均前向次数是在该 `eps` 下这一验证器能达到的上限参考。标定是逐步独立计算的，没有考虑前面步已冻结的 token 和 `max_ratio` 上限，实际冻结比例会低于 `accepted_fraction` 之和。应在多个 prompt、seed 和任务（T2AV / I2AV / FL2AV）上标定后取保守值。加 `--warmup` 时预热请求同名，结果会被计时请求覆盖。
+把 `replay.calibrated` 中选定 `eps` 各步的 `tau` 填入 `token_saturation_tau_stab` / `token_saturation_tau_red`（每类分数只有一个阈值，多个稳定性步时取较小的），再关闭 oracle 运行。重放假设冻结不改变其余 token 的轨迹，实际冻结后活跃 token 看到的上下文与稠密时不同，这部分偏差只能在 GPU 上对比 token 饱和输出和稠密输出来测。应在多个 prompt、seed 和任务（T2AV / I2AV / FL2AV）上标定后取保守值。加 `--warmup` 时预热请求同名，结果会被计时请求覆盖。
 
 阈值尚未标定。以上默认值只是起点，需要在 GPU 上用 oracle 标定并对比基线的画质和耗时后调整；该路径还没有在 GPU 上运行过。
 
