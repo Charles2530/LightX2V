@@ -20,7 +20,8 @@ def _swiglu_quant_kernel(
     activation_dtype: tl.constexpr,
     block: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    # Packed I2AV/FL2AV rows can exceed 2**31 elements with the FFN stride.
+    row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, block)
     value = tl.load(value_ptr + row * value_row_stride + columns, columns < width, 0).to(tl.float32)
     gate = tl.load(gate_ptr + row * gate_row_stride + columns, columns < width, 0).to(tl.float32)

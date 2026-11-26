@@ -1300,7 +1300,22 @@ class MiniMaxH3Qwen3VLTextEncoder:
                 input_ids = torch.tensor(token_ids, dtype=torch.long)
                 token_tags = torch.tensor(tags, dtype=torch.long)
                 processor = self.load_processor()
-                mm_types = torch.tensor(processor.create_mm_token_type_ids([token_ids])[0], dtype=torch.long)
+                # Transformers 5.x exposed ``create_mm_token_type_ids`` on
+                # the processor, while 4.57.x only provides the equivalent
+                # token-id convention through ``return_mm_token_type_ids``.
+                # Keep the encoder compatible with both APIs.
+                if hasattr(processor, "create_mm_token_type_ids"):
+                    mm_type_ids = processor.create_mm_token_type_ids([token_ids])[0]
+                else:
+                    mm_type_ids = [0] * len(token_ids)
+                    image_token_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+                    video_token_id = self.tokenizer.convert_tokens_to_ids("<|video_pad|>")
+                    for index, token_id in enumerate(token_ids):
+                        if token_id == image_token_id:
+                            mm_type_ids[index] = 1
+                        elif token_id == video_token_id:
+                            mm_type_ids[index] = 2
+                mm_types = torch.tensor(mm_type_ids, dtype=torch.long)
                 position_ids = self._get_rope_index(
                     input_ids,
                     mm_types,
