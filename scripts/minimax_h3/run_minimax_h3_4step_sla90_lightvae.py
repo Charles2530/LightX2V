@@ -6,6 +6,8 @@ vision patch Linear + LightVAE decoder. The model is configured by
 ``--changing_resolution`` turns on the progressive-resolution scheduler on top;
 ``--token_saturation`` turns on per-token early commitment within the fixed
 four steps (``token_saturation_*`` keys in the config). The two are exclusive.
+``--token_saturation_oracle_dir`` runs the dense trajectory with token
+saturation in oracle mode and saves per-token records and suggested thresholds.
 
 ``--warmup`` runs the same request once before the timed request, so compile
 and autotune for the real shape are excluded from ``request_s``. A missing
@@ -41,10 +43,13 @@ def parse_args():
     parser.add_argument("--num_frames", type=int, default=243)
     parser.add_argument("--changing_resolution", action="store_true", help="Enable progressive resolution (keys from the config)")
     parser.add_argument("--token_saturation", action="store_true", help="Enable fixed four-step token saturation (keys from the config)")
+    parser.add_argument("--token_saturation_oracle_dir", help="Token saturation oracle mode: freeze nothing, save calibration records here")
     parser.add_argument("--warmup", action="store_true", help="Run the request once before timing it")
     args = parser.parse_args()
     if args.last_frame_path and not args.image_path:
         parser.error("--last_frame_path requires --image_path")
+    if args.token_saturation_oracle_dir:
+        args.token_saturation = True
     if args.changing_resolution and args.token_saturation:
         parser.error("--changing_resolution and --token_saturation cannot be combined")
     return args
@@ -65,6 +70,8 @@ def build_config(args):
         config["changing_resolution"] = True
     if args.token_saturation:
         config["token_saturation"] = True
+    if args.token_saturation_oracle_dir:
+        config["token_saturation_oracle_dir"] = args.token_saturation_oracle_dir
     return config
 
 
@@ -112,6 +119,7 @@ def main():
         "task": task,
         "changing_resolution": bool(config.get("changing_resolution")),
         "token_saturation": bool(config.get("token_saturation")),
+        "token_saturation_oracle_dir": config.get("token_saturation_oracle_dir") if config.get("token_saturation") else None,
         "warmup": args.warmup,
         "request_s": round(request_s, 3),
         "peak_allocated_gib": round(torch.cuda.max_memory_allocated() / 2**30, 3),

@@ -19,12 +19,25 @@ and then thresholded.
 
 Unlike the paper's KV cache of accepted tokens, which would need about 75 GB
 at 768x1344x243, frozen tokens leave the packed sequence. Frozen tokens on a
-``token_saturation_context_stride`` spatial lattice stay as clean context
-rows. They take the keyframe condition timestep, so they reuse the AdaLN cache
-entries of conditioned requests. Stride 0 drops all frozen tokens.
+``token_saturation_context_stride`` spatial lattice stay as context rows,
+recomputed every forward and never updated. Stride 0 drops all frozen tokens.
+``token_saturation_context_timestep`` sets how they enter:
+
+* ``"current"``: the frozen draft is renoised with its initial noise to the
+  current sigma and takes the target timestep. Every target row then shares
+  one noise level, as in training, and the AdaLN cache keys are unchanged.
+* ``"keyframe"``: the draft enters like a keyframe, at the keyframe noise
+  level and timestep. It reuses the AdaLN entries of conditioned requests.
+
+Oracle mode (``token_saturation_oracle_dir``) freezes nothing, so the output
+matches the dense sampler. It records every step's drafts and scores on one
+trajectory, measures each token's distance to its final draft, and saves the
+oracle step counts plus suggested thresholds for calibration.
 """
 
+import json
 import math
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -73,13 +86,16 @@ def _min_distance(queries: torch.Tensor, keys: torch.Tensor, chunk: int = 8192) 
     return torch.cat([torch.cdist(part, keys).amin(dim=1) for part in queries.split(chunk)])
 
 
-def select_layout_rows(full: MiniMaxH3PackedSequence, context_ids: torch.Tensor, active_ids: torch.Tensor) -> MiniMaxH3PackedSequence:
+def select_layout_rows(full: MiniMaxH3PackedSequence, context_ids: torch.Tensor, active_ids: torch.Tensor, context_as_condition: bool) -> MiniMaxH3PackedSequence:
     """Keep text, keyframe and audio rows plus chosen target video rows.
 
     ``context_ids`` and ``active_ids`` index the target video rows (in target
-    order). Original positions and tags are kept. Context rows are placed in
-    the condition segment of ``video_indices`` so the base scheduler gives
-    them the keyframe timestep and never updates them.
+    order). Original positions and tags are kept. With ``context_as_condition``
+    the context rows join the condition segment of ``video_indices``, so the
+    base scheduler gives them the keyframe timestep: ``[cond | context | active]``.
+    Otherwise they follow the active rows in the target segment and take the
+    target timestep: ``[cond | active | context]``. Callers discard whatever the
+    base update writes to them.
     """
     condition = full.num_condition_video_rows
     targets = full.video_indices[condition:]
@@ -89,7 +105,9 @@ def select_layout_rows(full: MiniMaxH3PackedSequence, context_ids: torch.Tensor,
     keep[targets[active_ids]] = True
     remap = keep.long().cumsum(0) - 1
     rows = keep.nonzero().squeeze(1)
-    video_indices = torch.cat((remap[full.video_indices[:condition]], remap[targets[context_ids]], remap[targets[active_ids]]))
+    context, active = remap[targets[context_ids]], remap[targets[active_ids]]
+    middle = (context, active) if context_as_condition else (active, context)
+    video_indices = torch.cat((remap[full.video_indices[:condition]], *middle))
     return MiniMaxH3PackedSequence(
         sequence_length=int(rows.numel()),
         position_ids=full.position_ids[rows],
@@ -97,7 +115,7 @@ def select_layout_rows(full: MiniMaxH3PackedSequence, context_ids: torch.Tensor,
         video_indices=video_indices,
         audio_indices=remap[full.audio_indices],
         text_indices=remap[full.text_indices],
-        num_condition_video_rows=condition + int(context_ids.numel()),
+        num_condition_video_rows=condition + (int(context_ids.numel()) if context_as_condition else 0),
         num_condition_audio_rows=full.num_condition_audio_rows,
     )
 
@@ -138,17 +156,47 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
             raise ValueError("token_saturation_context_stride must be >= 0 and token_saturation_bucket >= 1")
         if not all(math.isfinite(sigma) and sigma >= 0 for sigma in (self.temporal_sigma, self.spatial_sigma)):
             raise ValueError("token_saturation_smooth_sigma must be two finite, nonnegative values")
+        self.context_timestep = config.get("token_saturation_context_timestep", "current")
+        if self.context_timestep not in ("current", "keyframe"):
+            raise ValueError("token_saturation_context_timestep must be 'current' or 'keyframe'")
+        oracle_dir = config.get("token_saturation_oracle_dir")
+        self.oracle_dir = None if not oracle_dir else Path(oracle_dir).expanduser()
+        self.oracle_eps = tuple(float(eps) for eps in config.get("token_saturation_oracle_eps", [0.02, 0.05, 0.1]))
+        self.oracle_precision = float(config.get("token_saturation_oracle_precision", 0.95))
+        if not self.oracle_eps or not all(math.isfinite(eps) and eps > 0 for eps in self.oracle_eps):
+            raise ValueError("token_saturation_oracle_eps must be a nonempty list of positive values")
+        if not 0 < self.oracle_precision <= 1:
+            raise ValueError("token_saturation_oracle_precision must lie in (0, 1]")
+        if self.oracle_dir is not None:
+            logger.info(f"MiniMax-H3 token saturation oracle mode: nothing is frozen, records go to {self.oracle_dir}")
         self._reset_state()
 
     def _reset_state(self):
-        for name in ("full_layout", "full_layout_cpu", "condition_rows", "target_rows", "initial_noise", "frozen", "scores", "prev_draft", "lattice", "active_ids", "context_ids", "grid_shape"):
+        for name in (
+            "full_layout",
+            "full_layout_cpu",
+            "condition_rows",
+            "target_rows",
+            "initial_noise",
+            "frozen",
+            "scores",
+            "prev_draft",
+            "lattice",
+            "active_ids",
+            "context_ids",
+            "grid_shape",
+            "seed",
+        ):
             setattr(self, name, None)
+        self.active_start = 0
         self.forward_rows = []
+        self.oracle_records = []
 
     def prepare(self, seed, num_frames, height, width, text_token_tags, **kwargs):
         if any(kwargs.get(key) is not None for key in ("references", "source_video_latents", "source_audio_latents", "draft_steps")):
             raise ValueError("H3 token saturation does not support Ref2AV, suffix regeneration or draft prefixes")
         super().prepare(seed, num_frames, height, width, text_token_tags, **kwargs)
+        self.seed = int(seed)
         condition = self.num_condition_video_rows
         self.full_layout_cpu = self.layout_cpu
         self.full_layout = self.layout
@@ -172,27 +220,40 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
             self.lattice = (on_rows[:, None] & on_cols[None, :]).reshape(1, -1).expand(frames, -1).reshape(-1)
         self.active_ids = torch.arange(num_targets, device=device)
         self.context_ids = self.active_ids[:0]
+        self.active_start = condition
         self.forward_rows = []
+        self.oracle_records = []
 
-    def _pack_rows(self):
+    def _pack_rows(self, step_index):
         """Rebuild the packed sequence from the frozen mask before a forward."""
+        condition = self.condition_rows.shape[0]
         if not bool(self.frozen.any()):
             self.layout_cpu, self.layout = self.full_layout_cpu, self.full_layout
             self.active_ids = torch.arange(self.frozen.numel(), device=self.frozen.device)
             self.context_ids = self.active_ids[:0]
+            self.active_start = condition
             self.video_latents = torch.cat((self.condition_rows, self.target_rows))
             return
         context = self.frozen & self.lattice if self.lattice is not None else torch.zeros_like(self.frozen)
         self.active_ids = (~self.frozen).nonzero().squeeze(1)
         self.context_ids = context.nonzero().squeeze(1)
-        self.layout_cpu = select_layout_rows(self.full_layout_cpu, self.context_ids.cpu(), self.active_ids.cpu())
+        as_condition = self.context_timestep == "keyframe"
+        self.layout_cpu = select_layout_rows(self.full_layout_cpu, self.context_ids.cpu(), self.active_ids.cpu(), as_condition)
         self.layout = _layout_to_device(self.layout_cpu, self.frozen.device)
-        # Frozen context rows enter like keyframes: clean draft at the keyframe noise level.
-        context_rows = flow_renoise(self.target_rows[self.context_ids], self.initial_noise[self.context_ids], 1.0 - KEYFRAME_NOISE_AUG)
-        self.video_latents = torch.cat((self.condition_rows, context_rows, self.target_rows[self.active_ids]))
+        # "keyframe": clean draft at the keyframe noise level. "current": the
+        # draft renoised with its own initial noise to this step's sigma.
+        sigma = 1.0 - KEYFRAME_NOISE_AUG if as_condition else self.video_sigmas[step_index]
+        context_rows = flow_renoise(self.target_rows[self.context_ids], self.initial_noise[self.context_ids], sigma)
+        active_rows = self.target_rows[self.active_ids]
+        if as_condition:
+            self.active_start = condition + context_rows.shape[0]
+            self.video_latents = torch.cat((self.condition_rows, context_rows, active_rows))
+        else:
+            self.active_start = condition
+            self.video_latents = torch.cat((self.condition_rows, active_rows, context_rows))
 
     def step_pre(self, step_index, *, warmup=False):
-        self._pack_rows()
+        self._pack_rows(int(step_index))
         super().step_pre(step_index, warmup=warmup)
         self.forward_rows.append((int(self.active_ids.numel()), int(self.context_ids.numel())))
 
@@ -205,20 +266,26 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
         active = min(math.ceil(active / self.bucket) * self.bucket, total - num_frozen)
         return total - num_frozen - active
 
+    @staticmethod
+    def _scale(rows):
+        return rows.norm(dim=1).median().clamp_min(1e-6)
+
+    def _smoothed_scores(self):
+        return smooth_scores(self.scores.view(self.grid_shape), self.temporal_sigma, self.spatial_sigma).reshape(-1)
+
     def _verify(self, draft):
         """Score active tokens after forward ``step_index`` and freeze the saturated ones."""
         step = self.step_index
-        scale = draft.norm(dim=1).median().clamp_min(1e-6)
         if step == 0:
             if self.tau_red is None or self.condition_rows.shape[0] == 0:
                 return
-            raw, tau, kind = _min_distance(draft, self.condition_rows.float()) / scale, self.tau_red, "redundancy"
+            raw, tau, kind = _min_distance(draft, self.condition_rows.float()) / self._scale(draft), self.tau_red, "redundancy"
         elif step in self.verify_steps:
-            raw, tau, kind = (draft - self.prev_draft[self.active_ids]).norm(dim=1) / scale, self.tau_stab, "stability"
+            raw, tau, kind = (draft - self.prev_draft[self.active_ids]).norm(dim=1) / self._scale(draft), self.tau_stab, "stability"
         else:
             return
         self.scores[self.active_ids] = raw
-        smoothed = smooth_scores(self.scores.view(self.grid_shape), self.temporal_sigma, self.spatial_sigma).reshape(-1)
+        smoothed = self._smoothed_scores()
         candidates = ((smoothed < tau) & ~self.frozen).nonzero().squeeze(1)
         count = self._new_frozen_count(int(candidates.numel()))
         if count > 0:
@@ -236,13 +303,85 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
                 f"candidates={int(candidates.numel())}, frozen +{count} -> {ratio:.3f}"
             )
 
+    def _record_oracle(self, draft):
+        """Dense trajectory: keep this step's draft and its training-free scores."""
+        record = {"draft": draft.float()}
+        scale = self._scale(draft)
+        if self.step_index > 0:
+            self.scores.copy_((draft - self.prev_draft).norm(dim=1) / scale)
+            record["stability"], record["stability_smoothed"] = self.scores.clone(), self._smoothed_scores()
+        if self.step_index == 0 and self.condition_rows.shape[0]:
+            self.scores.copy_(_min_distance(draft, self.condition_rows.float()) / scale)
+            record["redundancy"], record["redundancy_smoothed"] = self.scores.clone(), self._smoothed_scores()
+        self.oracle_records.append(record)
+
+    def _calibrate(self, scores, good):
+        """Largest threshold whose accepted tokens reach ``oracle_precision``."""
+        order = scores.argsort()
+        ranked = scores[order]
+        hits = good[order].float().cumsum(0)
+        precision = hits / torch.arange(1, scores.numel() + 1, device=scores.device)
+        valid = (precision >= self.oracle_precision).nonzero()
+        if valid.numel() == 0:
+            return {"tau": 0.0, "accepted_fraction": 0.0, "precision": None, "recall": 0.0}
+        last = int(valid[-1])
+        # Freezing uses ``score < tau``, so take the next score as the bound.
+        tau = float(ranked[last + 1]) if last + 1 < ranked.numel() else float(ranked[last]) * (1 + 1e-6) + 1e-12
+        return {
+            "tau": tau,
+            "accepted_fraction": (last + 1) / scores.numel(),
+            "precision": float(precision[last]),
+            "recall": float(hits[last] / good.sum().clamp_min(1)),
+        }
+
+    def _finish_oracle(self, final_draft):
+        """Compare every draft with the final one, then save step counts and thresholds."""
+        final = final_draft.float()
+        scale = self._scale(final)
+        rel = torch.stack([(record["draft"] - final).norm(dim=1) / scale for record in self.oracle_records])
+        quantiles = torch.tensor([0.1, 0.5, 0.9, 0.99], device=rel.device)
+        summary = {
+            "seed": self.seed,
+            "size": [self.height, self.width],
+            "num_frames": self.num_frames,
+            "grid_shape": list(self.grid_shape),
+            "num_tokens": int(final.shape[0]),
+            "video_sigmas": [round(float(sigma), 6) for sigma in self.video_sigmas],
+            "rel_to_final_q10_q50_q90_q99": {f"step{step}": [round(q, 5) for q in torch.quantile(row, quantiles).tolist()] for step, row in enumerate(rel)},
+            "precision_target": self.oracle_precision,
+            "oracle": {},
+            "calibration": {},
+        }
+        steps = self.infer_steps
+        for eps in self.oracle_eps:
+            ok = rel <= eps
+            first = torch.where(ok.any(0), ok.float().argmax(0), torch.full_like(ok[0], steps - 1, dtype=torch.long))
+            forwards = first + 1
+            summary["oracle"][f"{eps:g}"] = {"mean_forwards": round(float(forwards.float().mean()), 4), "forwards_histogram": torch.bincount(forwards, minlength=steps + 1)[1:].tolist()}
+        targets = [("stability", step) for step in range(1, steps - 1)]
+        if "redundancy" in self.oracle_records[0]:
+            targets.append(("redundancy", 0))
+        for name, step in targets:
+            scores = self.oracle_records[step][f"{name}_smoothed"]
+            summary["calibration"][f"{name}_step{step}"] = {f"{eps:g}": self._calibrate(scores, rel[step] <= eps) for eps in self.oracle_eps}
+        self.oracle_dir.mkdir(parents=True, exist_ok=True)
+        stem = self.oracle_dir / f"token_saturation_oracle_seed{self.seed}_{self.height}x{self.width}x{self.num_frames}"
+        tensors = {f"{key}_step{step}": value.cpu() for step, record in enumerate(self.oracle_records) for key, value in record.items() if key != "draft"}
+        torch.save({"grid_shape": self.grid_shape, "rel_to_final": rel.cpu(), **tensors}, stem.with_suffix(".pt"))
+        stem.with_suffix(".json").write_text(json.dumps(summary, indent=2))
+        logger.info(f"MiniMax-H3 token saturation oracle (eps -> mean forwards): {json.dumps(summary['oracle'])}, saved to {stem}.json/.pt")
+
     def step_post(self):
-        condition = self.layout.num_condition_video_rows
-        draft = flow_predict_clean(self.video_latents[condition:], self.video_noise_pred[condition:], self.video_sigmas[self.step_index])
+        # Only the active rows are read back; context rows were never meant to move.
+        active = slice(self.active_start, self.active_start + int(self.active_ids.numel()))
+        draft = flow_predict_clean(self.video_latents[active], self.video_noise_pred[active], self.video_sigmas[self.step_index])
         super().step_post()
-        self.target_rows[self.active_ids] = self.video_latents[condition:]
+        self.target_rows[self.active_ids] = self.video_latents[active]
         if self.step_index < self.infer_steps - 1:
-            self._verify(draft)
+            if self.oracle_dir is None:
+                self._verify(draft)
+            else:
+                self._record_oracle(draft)
             if self.prev_draft is None:
                 self.prev_draft = torch.zeros_like(self.target_rows, dtype=torch.float32)
             self.prev_draft[self.active_ids] = draft
@@ -251,12 +390,14 @@ class MiniMaxH3TokenSaturationScheduler(MiniMaxH3Scheduler):
         self.layout_cpu, self.layout = self.full_layout_cpu, self.full_layout
         self.video_latents = torch.cat((self.condition_rows, self.target_rows))
         if not self.is_warmup_step:
+            if self.oracle_dir is not None:
+                self._finish_oracle(draft)
             total = self.frozen.numel()
-            active = sum(rows for rows, _ in self.forward_rows)
+            forwards = sum(rows for rows, _ in self.forward_rows)
             packed = sum(rows + context for rows, context in self.forward_rows)
             logger.info(
                 f"MiniMax-H3 token saturation: target rows per forward {self.forward_rows}, "
-                f"mean forwards per token {active / total:.3f}/{self.infer_steps}, packed target rows {packed / (total * self.infer_steps):.3f} of dense"
+                f"mean forwards per token {forwards / total:.3f}/{self.infer_steps}, packed target rows {packed / (total * self.infer_steps):.3f} of dense"
             )
 
     def clear(self):

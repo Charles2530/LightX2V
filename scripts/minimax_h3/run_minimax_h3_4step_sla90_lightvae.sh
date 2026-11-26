@@ -8,6 +8,7 @@
 #   bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup --image_path /path/to/first.png
 #   CHANGING_RESOLUTION=1 bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup
 #   TOKEN_SATURATION=1 bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh --warmup
+#   TOKEN_SATURATION_ORACLE_DIR=/path/to/oracle bash scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh
 
 # set path firstly
 lightx2v_path=${lightx2v_path:-/path/to/LightX2V}
@@ -36,6 +37,9 @@ if [ "${CHANGING_RESOLUTION:-0}" = "1" ]; then
 fi
 if [ "${TOKEN_SATURATION:-0}" = "1" ]; then
     extra_args+=(--token_saturation)
+fi
+if [ -n "${TOKEN_SATURATION_ORACLE_DIR}" ]; then
+    extra_args+=(--token_saturation_oracle_dir "${TOKEN_SATURATION_ORACLE_DIR}")
 fi
 
 python "${lightx2v_path}/scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.py" \
