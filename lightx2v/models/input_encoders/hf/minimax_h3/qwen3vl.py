@@ -1090,7 +1090,11 @@ class MiniMaxH3Qwen3VLTextEncoder:
             "Building native MiniMax-H3 Qwen3-VL vision tower from {} for image input task.",
             text_encoder_path,
         )
-        vision_encoder = MiniMaxH3Qwen3VLVisionTower.from_pretrained(text_encoder_path, vision_config)
+        vision_encoder = MiniMaxH3Qwen3VLVisionTower.from_pretrained(
+            text_encoder_path,
+            vision_config,
+            patch_embed_linear=self.config.get("vision_patch_embed_linear", False),
+        )
         if not self.cpu_offload:
             vision_encoder.to(AI_DEVICE)
         self.vision_encoder = vision_encoder

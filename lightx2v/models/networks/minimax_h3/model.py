@@ -570,21 +570,6 @@ class MiniMaxH3Model(BaseTransformerModel):
         if prepost_offload and self.scheduler.step_index == getattr(self.scheduler, "start_step_index", 0):
             self.pre_weight.to_cuda()
             self.post_weight.to_cuda()
-        if self.config.get("seq_parallel", False) and self._cr_lowres_rank0_sp():
-            if self.config.get("tensor_parallel", False):
-                raise ValueError("cr_lowres_rank0_sp currently requires tensor_parallel=false")
-            root = dist.get_process_group_ranks(self.seq_p_group)[0]
-            if dist.get_rank() == root:
-                output = self._infer_cond_uncond(inputs, infer_condition=True)
-                video, audio = output.video, output.audio
-            else:
-                video = torch.empty_like(self.scheduler.video_latents)
-                audio = torch.empty_like(self.scheduler.audio_latents)
-            dist.broadcast(video, src=root, group=self.seq_p_group)
-            dist.broadcast(audio, src=root, group=self.seq_p_group)
-            self.scheduler.video_noise_pred = video
-            self.scheduler.audio_noise_pred = audio
-            return
         output = self._infer_cond_uncond(inputs, infer_condition=True)
         self.scheduler.video_noise_pred = output.video
         self.scheduler.audio_noise_pred = output.audio
@@ -592,21 +577,12 @@ class MiniMaxH3Model(BaseTransformerModel):
             self.pre_weight.to_cpu()
             self.post_weight.to_cpu()
 
-    def _cr_lowres_rank0_sp(self):
-        return self.config.get("cr_lowres_rank0_sp", False) and self.config.get("changing_resolution", False) and getattr(self.scheduler, "full_state", None) is not None and not self.scheduler.lifted
-
     @torch.no_grad()
     def _seq_parallel_pre_process(self, pre_infer_out):
-        if self._cr_lowres_rank0_sp():
-            # Rank zero evaluates the complete low grid. The high stage keeps
-            # the original Ulysses path; predictions are broadcast in infer().
-            return pre_infer_out
         return shard_packed_sequence(pre_infer_out, self.seq_p_group)
 
     @torch.no_grad()
     def _seq_parallel_post_process(self, output, pre_infer_out):
-        if self._cr_lowres_rank0_sp():
-            return output
         return gather_packed_sequence(output, pre_infer_out, self.seq_p_group)
 
     def to_cpu(self):

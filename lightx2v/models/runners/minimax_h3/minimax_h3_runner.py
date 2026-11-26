@@ -139,8 +139,7 @@ class MiniMaxH3Runner(DefaultRunner):
             torch_device_module.synchronize()
             del pixels
 
-        warmup_shapes = self.config.get("warmup_shapes", self._WARMUP_SHAPES)
-        for warmup_index, (height, width, num_frames) in enumerate(warmup_shapes):
+        for warmup_index, (height, width, num_frames) in enumerate(self._WARMUP_SHAPES):
             logger.info(f"Warmup {task}: {height}x{width}x{num_frames}")
             transformer_offloaded = not self.config.get("cpu_offload", False)
             try:
@@ -149,6 +148,7 @@ class MiniMaxH3Runner(DefaultRunner):
                 self.inputs = self._run_input_encoder_local_h3()
                 self.init_run()
 
+                # Changing resolution compiles the low and the lifted grids, so warm up every step.
                 warmup_steps = self.scheduler.infer_steps if self.config.get("changing_resolution", False) else self._WARMUP_STEP_COUNT
                 for step_index in range(min(warmup_steps, self.scheduler.infer_steps)):
                     self.scheduler.step_pre(step_index, warmup=True)
@@ -176,7 +176,7 @@ class MiniMaxH3Runner(DefaultRunner):
         self.input_info = self.get_input_info_type(task)(
             task=task,
             seed=0,
-            prompt=self._WARMUP_PROMPTS[warmup_index % len(self._WARMUP_PROMPTS)],
+            prompt=self._WARMUP_PROMPTS[warmup_index],
             size=[height, width],
             num_frames=num_frames,
             return_result_tensor=True,
@@ -317,6 +317,7 @@ class MiniMaxH3Runner(DefaultRunner):
             attn_type=self.config.get("vae_attn_type", "torch_sdpa"),
             offload_granularity=self.config.get("video_vae_offload_granularity", "model"),
             shared_cpu_config=self.config if self.config.get("video_vae_shared_cpu_weights", False) else None,
+            decoder_checkpoint_path=self.config.get("video_vae_decoder_ckpt"),
         )
         self._vae_decode_tile_shapes = self.config.get("vae_decode_tile_shape", {})
         self._validate_vae_decode_tile_shapes(self._vae_decode_tile_shapes, video_vae)

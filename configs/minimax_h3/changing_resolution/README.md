@@ -8,6 +8,12 @@ checkpoint from the corresponding `distill/4steps` configuration. Replace the
 placeholder checkpoint paths before use. The supplied examples use one GPU;
 set `parallel.seq_p_size` for your available hardware.
 
+The single-GPU baseline
+`configs/minimax_h3/distill/4steps/minimax_h3_fp8_4step_5090_sla90_lightvae.json`
+carries the same keys with `changing_resolution=false`; set it to `true` (or run
+`scripts/minimax_h3/run_minimax_h3_4step_sla90_lightvae.sh` with
+`CHANGING_RESOLUTION=1`) to stack progressive resolution on that baseline.
+
 The interface follows Wan's `changing_resolution`, `resolution_rate` and
 `changing_resolution_steps`. A switch value of `2` means two completed
 low-resolution evaluations. Only one transition is supported. Spatial sizes
@@ -53,32 +59,13 @@ grid on each call. Compatibility still requires a real run on the selected
 backend/hardware. No cached hidden state may cross the transition.
 
 With progressive resolution enabled, built-in warmup evaluates the full
-trajectory so both grids execute. `warmup_shapes` overrides the existing
-synthetic warmup canvases. Include the real production height, width and frame
-count; different prompts can still produce different sequence lengths. Exclude
-loading, compilation and warmup from reported request latency. CUDA Graph
-capture is not added by this change.
+trajectory so both grids execute. Exclude loading, compilation and warmup
+from reported request latency. CUDA Graph capture is not added by this change.
 
 Build AdaLN tables with the repository's existing
 `tools/cache_minimax_h3_adaln/cache_minimax_h3_adaln.py` using the final model,
 LoRA and configuration. Schedule-only cache entries remain valid across spatial
 grids; a changed sigma requires new entries or online modulation.
-
-## Low-stage SP experiment
-
-`cr_lowres_rank0_sp` defaults to `false`. With native sequence parallel enabled,
-setting it to `true` makes the sequence-parallel group's first rank evaluate
-complete low-resolution steps, then broadcast the video and audio velocity
-predictions to its peers. Every rank performs the same scheduler update. After
-the spatial lift, the original Ulysses path resumes. The option requires
-`tensor_parallel=false` and a progressive-resolution scheduler; HHHH ignores it.
-
-This changes low-stage arithmetic relative to quantized sequence exchange.
-It is an experimental scheduling option, not a claim of identical progressive
-outputs or unchanged audiovisual quality. Verify same-seed HHHH invariance,
-replicated latent consistency, memory and post-warmup request latency for the
-selected hardware. Broadcasting predictions avoids assuming independent
-rank-local quantized forwards are bitwise identical.
 
 ## Stage-three quality ablations
 

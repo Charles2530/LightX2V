@@ -70,12 +70,5 @@
   "cr_lowres_noise": "pooled",
   "cr_renoise_noise": "fresh",
   "cr_keep_audio_rope": true,
-  "cr_sigma_bump": 0.0,
-  "warmup_shapes": [
-    [
-      768,
-      1344,
-      243
-    ]
-  ]
+  "cr_sigma_bump": 0.0
 }

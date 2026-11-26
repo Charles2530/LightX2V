@@ -21,6 +21,3 @@ def test_swiglu_rows_beyond_int32_element_offset():
     expected = (torch.tensor(2.0, device="cuda", dtype=x.dtype) * torch.nn.functional.silu(torch.tensor(1.0, device="cuda", dtype=x.dtype))).float()
     torch.testing.assert_close(scales[-2:], (expected / 7.0).expand(2), rtol=0, atol=0)
     torch.testing.assert_close(quantized[-2:].float(), torch.full((2, width), 7.0, device="cuda"), rtol=0, atol=0)
-
-
-"""CUDA_VISIBLE_DEVICES=0 .venv_h3_runtime/bin/python -m pytest /mnt/afs_1/charles/codes/5090/LightX2V-main/tests/test_h3_swiglu_large_stride.py"""

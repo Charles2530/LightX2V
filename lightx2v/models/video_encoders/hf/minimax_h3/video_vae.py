@@ -818,9 +818,12 @@ class MiniMaxH3VideoVAE(nn.Module):
         attn_type: str = "torch_sdpa",
         offload_granularity: str = "model",
         shared_cpu_config: dict | None = None,
+        decoder_checkpoint_path: str | Path | None = None,
     ) -> "MiniMaxH3VideoVAE":
         if offload_granularity not in {"model", "block"}:
             raise ValueError("video_vae_offload_granularity must be model or block")
+        if decoder_checkpoint_path is not None and (offload_granularity == "block" or shared_cpu_config is not None):
+            raise ValueError("video_vae_decoder_ckpt (LightVAE) does not support shared or block VAE offload")
         if offload_granularity == "block" or shared_cpu_config is not None:
             if not cpu_offload or quant_scheme is not None or use_compile:
                 raise ValueError("H3 VAE shared/block mode requires CPU offload, original weights and vae_use_compile=false")
@@ -893,6 +896,12 @@ class MiniMaxH3VideoVAE(nn.Module):
         if shared_cpu_config is None:
             model._prepare_inference_weights(use_channels_last_encoder=use_channels_last_encoder)
         model._use_channels_last_encoder_input = use_channels_last_encoder
+        if decoder_checkpoint_path is not None:
+            # Replace after the full load so the original checkpoint, including
+            # any FP8 decoder weights, stays strictly validated.
+            from lightx2v.models.video_encoders.hf.minimax_h3.lightvae import replace_with_lightvae_decoder
+
+            replace_with_lightvae_decoder(model, decoder_checkpoint_path, attn_type=attn_type, use_compile=use_compile)
         model.eval().requires_grad_(False)
         if offload_granularity == "block" or shared_cpu_config is not None:
             from lightx2v.common.offload.module_adapter import ModuleCPUWeights

@@ -66,15 +66,22 @@ def _rotate_half(value):
 
 
 class _PatchEmbed(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, use_linear=False):
         super().__init__()
         self.in_channels = config["in_channels"]
         self.temporal_patch_size = config["temporal_patch_size"]
         self.patch_size = config["patch_size"]
+        # Each input row is exactly one non-overlapping Conv3d receptive field
+        # (stride == kernel, no padding), so the projection is also a Linear
+        # over the flattened C*T*P*P patch. The Conv3d weights are kept.
+        self.use_linear = use_linear
         kernel = (self.temporal_patch_size, self.patch_size, self.patch_size)
         self.proj = nn.Conv3d(self.in_channels, config["hidden_size"], kernel_size=kernel, stride=kernel, bias=True)
 
     def forward(self, pixels):
+        if self.use_linear:
+            flat = pixels.reshape(-1, self.in_channels * self.temporal_patch_size * self.patch_size**2)
+            return F.linear(flat.to(self.proj.weight.dtype), self.proj.weight.flatten(1), self.proj.bias)
         pixels = pixels.view(-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
         return self.proj(pixels.to(self.proj.weight.dtype)).view(-1, self.proj.out_channels)
 
@@ -154,11 +161,11 @@ class _PatchMerger(nn.Module):
 
 
 class MiniMaxH3Qwen3VLVisionTower(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, patch_embed_linear=False):
         super().__init__()
         self.config = dict(config)
         self.spatial_merge_size = int(config["spatial_merge_size"])
-        self.patch_embed = _PatchEmbed(config)
+        self.patch_embed = _PatchEmbed(config, use_linear=patch_embed_linear)
         self.pos_embed = nn.Embedding(config["num_position_embeddings"], config["hidden_size"])
         self.blocks = nn.ModuleList([_VisionBlock(config) for _ in range(config["depth"])])
         self.merger = _PatchMerger(config)
@@ -188,10 +195,10 @@ class MiniMaxH3Qwen3VLVisionTower(nn.Module):
         return self.merger(hidden_states), deepstack
 
     @classmethod
-    def from_pretrained(cls, text_encoder_path, vision_config):
+    def from_pretrained(cls, text_encoder_path, vision_config, patch_embed_linear=False):
         root = Path(text_encoder_path)
         with torch.device("meta"):
-            model = cls(vision_config)
+            model = cls(vision_config, patch_embed_linear=patch_embed_linear)
         with (root / "model.safetensors.index.json").open("r", encoding="utf-8") as handle:
             weight_map = json.load(handle)["weight_map"]
         prefix = "model.visual."
